@@ -1,0 +1,93 @@
+
+
+cd /home/matthias/Schreibtisch/OtreraPaint && cmake --build build -j$(nproc) && ./build/minipaint
+
+
+
+Bleistifteinstellung: Pixelgröße, Pixel-Perfekt(wenn man eine Kurve zieht, keine doppelpixel)
+
+
+Mirror Option einstellen
+Helligkeit und Kontraste
+Sättigungeinstellung
+
+
+
+Alle Werkzeuge:
+Pixelstift: Pixelperfekt(Verhindert doppelpixel)
+Pinsel: Größe, Weichzeichnen, stapeln, dither
+Auswahl: Rechteck, Kreis, Lasso
+Zauberstab: Zusammenhängende Pixel, alle Pixel, Empfindlichkeit
+Füllen: Zusammenhängende Pixel, alle Pixel, Empfindlichkeit
+Formen: Kreis, Viereck, Dreieck, Linie --- Ausgefüllt oder nur Rahmen(Rahmendicke einstellbar)
+Pipette: -
+Text: Schriftgröße, Farbe
+Verschieber: Auswahl verschieben, ausgewählte Pixel verschieben
+
+Alles hat die Supereinstellung, wo es Sinn ergibt(Ebenenübergreifend)
+Rechtsklick ist löschen bei den Werkzeugen(Nur bei Auswahl-, Formen-, Pixelstift-, Pinsel- und füllenwerkzeug)
+
+
+
+____________________________________________________________________________________________________________________________________________________________________________________________
+____________________________________________________________________________________________________________________________________________________________________________________________
+____________________________________________________________________________________________________________________________________________________________________________________________
+
+:::SagarisCode:::
+
+Ein separates Programm, welches in OtreraRPGs geöffnet werden kann und als Datei im Engineordner liegt!
+Du kannst die API eines KI-Modells verknüpfen und ein Modell wählen.
+Es gibt ein Chatfenster mit einer Eingabeleiste und das Live-Terminal-Log darüber.
+Es gibt einen kleinen Verlauf mit Timeline, um die Engine zurückzusetzen
+Buttons: "Item", "Gegner", "NPC," "Spieler" (Wählt man einen Button aus, erscheint das entsprechende Formular, ansonsten bleib das Standard Chatfenster)
+    Es kann neues erstellt oder altes bearbeitet werden
+    Wenn man durch die Buttons etwas erstellt und das Formular ausfüllt und Bild einfügt, kann man direkt erstellen. 
+    Man kann zusätzlich unten einen Prompt schreiben, um einen Gegner komplett neu zu programmieren, erst dann wird Aider angepeilt
+
+Zusammenspiel mit Aider:
+Automatischer Commit-Hash-Merkposten
+Engine schließen
+Aider anpeilen(+dart analyzer +dart test)
+Generiert eine JSON, wo notiert wird, auf welche Dateien wie zugegriffen wurde
+Git-Reset bei Fehlschlag/Abbruch
+Bei Abschluss erscheint ein Hinweis-Fenster
+Engine Neustarten
+
+das genau wird in die JSON geschrieben: 
+Welche Dateien betroffen sind und welcher Art die Änderung ist (neue Datei / neuer Hook-Aufruf / Erweiterung eines Enums / Override einer Methode)
+Welche Abhängigkeiten der Gegner braucht (Skill-IDs, Status-Effekte, Sprite-Namen, Sound-Assets) – als explizite Liste, damit die Ziel-KI (oder der Nutzer) vorab prüfen kann, ob das alles beim Empfänger existiert
+Gegen welche Engine-/Schema-Version der Code geschrieben wurde, damit Versionskonflikte früh auffallen
+Die Hook-Punkte (z. B. "erwartet Methode onTurnStart(BattleContext ctx) in der Basisklasse") statt konkreter Zeilennummern
+____________________________________________________________________________________________________________________________________________________________________________________________
+
+Plan mit KI Integration:
+Funktioniert dieser Plan für meine RPG Engine, wo man durch eine Einstellung per API mit einer KI kommunizieren kann, dass sie die Engine erweitern soll? Nur der Spielentwickler arbeitet mit der Engine und er hat einmal die RPG Engine und ein Programm zur Verfügung: 
+
+Zuerst wird ein komplettes Backup(git) der gesamten Engine erstellt. Ich habe einen Statischen Code-Analyser, der die Engine darauf prüft, welche Dateien mit der zu ändernden Datei zusammenhängt. Eine RAG unterstützt den Code-Analyser. Es sucht die relevanten Datein heraus und ein Programm dupliziert die Dartdateien in einem vorgesehen Ordner. Man kann in diesem Dart-Programm einen Prompt für eine Erweiterung der Engine (z. B. einen neuen Gegner) schreiben. Dieser Prompt wird zusammen mit den von der Statische Code-Analyser ausgesuchten Dart-Datei des Programms an Claude geschickt mit dem Hinweis, was bei welcher Datei relevant zu ändern ist. Claude schreibt den passenden Dart-Code, einen Unit-Test und für neue Logik ebenfalls tests. Das wird in einer Sandbox(Git enthält ganze Engine(git worktree)) isoliert. Über einen Compiler-Check (dart analyze + dart test + analysis_options.yaml + game_simulation_test.dart + Stagging-Verfahren) wird der Code auf Fehler getestet. Die Fehlermeldung wird Claude zurückgeschickt. Bei Scheitern soll eine Fehlermeldung aufploppen und alles wird rückgängig gemacht. Ein Timeout nach 5 Minuten pro Iteration verhindert eine Schleife. Claude darf nur 3 Versuche unternehmen. Jetzt kommt ein Fenster auf, welches warnt, dass die Engine geschlossen wird, das muss akzeptiert werden, damit der Datenaustausch stattfinden kann. Die originalen Engine-Dart-Dateien werden dann mit den Programm-Dart-Dateien ausgetauscht(mit git) und neue Dateien werden hinzugefügt und das Programm startet die Kompilierung und die alten Programm-Dart-Dateien gelöscht. Backups muss eigentständig gelöscht werden. Nun kann die Engine gestartet werden und hat das Update erhalten.
+____________________________________________________________________________________________________________________________________________________________________________________________
+
+
+OtreraRPGs sollte ein Git zur Sicherung haben, wo ich über SagrarisCode resets durchführen kann.
+
+
+
+
+
+
+
+
+
+
+
+Unter der Werkzeugeinstellungsleiste sollen Prewviews aller geöffneter Dateien linkbündig angezeigt werden. Es ist inspiriert von Paint.net. Wenn ich mehrere Dateien öffne sollen die Dateien sich da als Preview angezeigt werden und wenn ich auf ein Preview klicke, dann wechselt man die Datei zur anderen. Die Previews sollen nur so viel Platz einnehmen wie möglich und keine neue leere Leiste erstellen, sondern pro Datei fügt sich ein Preview hinzu.
+
+
+
+
+
+
+
+
+
+
+
