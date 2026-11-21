@@ -71,6 +71,13 @@ enum Edge {
     BottomRight = Bottom | Right
 };
 
+// Merkt am Hauptfenster, dass der Nutzer die Fenster selbst angeordnet
+// hat. Ab dann wird die Standard-Anordnung nicht mehr neu berechnet.
+void markUserArranged(QDockWidget* dock) {
+    if (QWidget* mw = dock ? dock->parentWidget() : nullptr)
+        mw->setProperty("dockLayoutUser", true);
+}
+
 class EdgeGrip : public QWidget {
 public:
     EdgeGrip(int edges, QDockWidget* dock)
@@ -127,6 +134,7 @@ protected:
         }
 
         m_dock->setGeometry(geo);
+        markUserArranged(m_dock);
     }
 
 private:
@@ -180,7 +188,10 @@ public:
             "              border-radius:3px; font-weight:bold; padding:0; }"
             "QToolButton:hover { background:#4a4a4a; }"
             "QToolButton:pressed { background:#2f2f2f; }");
-        connect(m_collapseBtn, &QToolButton::clicked, this, [this]() { toggleCollapsed(); });
+        connect(m_collapseBtn, &QToolButton::clicked, this, [this]() {
+            toggleCollapsed();
+            markUserArranged(m_dock);
+        });
         lay->addWidget(m_collapseBtn);
 
         connect(dock, &QDockWidget::windowTitleChanged, m_title, &QLabel::setText);
@@ -191,6 +202,9 @@ public:
     QSize minimumSizeHint() const override { return QSize(0, kBarHeight); }
 
     bool collapsed() const { return m_collapsed; }
+    // Größe im ausgeklappten Zustand (auch wenn gerade eingeklappt).
+    QSize expandedSize() const { return m_collapsed ? m_savedSize : m_dock->size(); }
+    void setCollapsed(bool c) { if (c != m_collapsed) toggleCollapsed(); }
 
 protected:
     void mousePressEvent(QMouseEvent* e) override {
@@ -206,6 +220,7 @@ protected:
     void mouseMoveEvent(QMouseEvent* e) override {
         if (m_dragging && (e->buttons() & Qt::LeftButton) && m_dock->isFloating()) {
             m_dock->move(e->globalPos() - m_dragOffset);
+            markUserArranged(m_dock);
             e->accept();
             return;
         }
@@ -335,67 +350,12 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     addMinimizeButton(m_layerDock);
     addMinimizeButton(m_historyDock);
 
-    // Startpositionen setzen (nachdem Fenster sichtbar ist).
+    // Startanordnung (nachdem das Fenster sichtbar ist): gespeicherte
+    // Anordnung vom letzten Programmstart oder – beim ersten Start – die
+    // Standard-Anordnung.
     QMetaObject::invokeMethod(this, [this]() {
-        QRect mg = geometry();
-        int gap = 10;
-        int dockW = 260;
-
-        // Y-Start: unter Menüleiste + Werkzeugleiste + Preview-Leiste.
-        int topInset = 0;
-        if (auto* mb = menuBar()) topInset += mb->height();
-        if (m_toolBar)            topInset += m_toolBar->height();
-        if (m_previewHost)        topInset += m_previewHost->height();
-        topInset += gap;
-
-        // --- Linke Seite: Farben oben, Palette darunter ---------------------
-        int leftX = mg.left() + gap;
-        int colorTop = mg.top() + topInset;
-
-        // ColorDock: sizeHint als Start, Aspect-Ratio korrigiert die Höhe.
-        m_colorDock->resize(dockW, m_colorDock->sizeHint().height());
-        int colorH = m_colorDock->height();
-        m_colorDock->move(leftX, colorTop);
-
-        // Palette: direkt darunter, nimmt den Rest der linken Seite ein.
-        int palTop = colorTop + colorH + gap;
-        int palH   = mg.bottom() - palTop - gap;
-        m_paletteDock->resize(dockW, qMax(palH, m_paletteDock->minimumSizeHint().height()));
-        m_paletteDock->move(leftX, palTop);
-
-        // --- Rechte Seite: Ebenen, Verlauf, Werkzeuge -----------------------
-        int rightX = mg.right() - dockW - gap;
-
-        // Ebenen oben.
-        int layerH = qMax(m_layerDock->sizeHint().height(), 300);
-        m_layerDock->resize(dockW, layerH);
-        m_layerDock->move(rightX, mg.top() + topInset);
-
-        // Verlauf direkt darunter.
-        int histTop = mg.top() + topInset + layerH + gap;
-        int histH   = m_historyDock->sizeHint().height();
-        m_historyDock->resize(dockW, histH);
-        m_historyDock->move(rightX, histTop);
-
-        // Werkzeuge direkt darunter, als 3x3-Gitter.
-        // 3 Buttons * 40px + 2*4 spacing + 2*6 margin = 140 Inhalt
-        // + Titelleiste (26px) + etwas Luft = ~175px
-        int toolsW = 140;
-        int toolsContentH = 3 * 40 + 2 * 4 + 2 * 6;  // = 140
-        int toolsH = toolsContentH + DockTitleBar::kBarHeight + 6;
-        int toolsTop = histTop + histH + gap;
-        // Werkzeugfenster rechtsbündig ausrichten (gleich rechter Rand wie die anderen).
-        int toolsX = mg.right() - toolsW - gap;
-        m_toolsDock->resize(toolsW, toolsH);
-        m_toolsDock->move(toolsX, toolsTop);
-
-        // Grips nach dem ersten Show/Resize neu positionieren.
-        for (auto it = m_grips.constBegin(); it != m_grips.constEnd(); ++it) {
-            auto* w = qobject_cast<QWidget*>(it.key());
-            if (w) repositionGrips(w);
-        }
-        // Relative Positionen erfassen, damit die Fenster beim Resize mitwandern.
-        storeDockRelativePositions();
+        if (!restoreDockLayout())
+            applyDefaultDockLayout();
     }, Qt::QueuedConnection);
 
     // Event-Filter installieren: verhindert, dass Docks
@@ -632,6 +592,132 @@ void MainWindow::constrainDock(QDockWidget* dock) {
         dock->move(x, y);
 }
 
+// ===================================================================
+// Fenster-Anordnung: Standard, Speichern, Wiederherstellen
+// ===================================================================
+
+// Version der gespeicherten Fenster-Anordnung. Wird sie erhöht, wird eine
+// ältere gespeicherte Anordnung einmalig verworfen (-> Standard-Anordnung).
+static constexpr int kDockLayoutVersion = 2;
+
+QList<QPair<QString, QDockWidget*>> MainWindow::namedDocks() const {
+    return {
+        { "farben",    m_colorDock   },
+        { "palette",   m_paletteDock },
+        { "ebenen",    m_layerDock   },
+        { "verlauf",   m_historyDock },
+        { "werkzeuge", m_toolsDock   },
+    };
+}
+
+// Standard-Anordnung beim ersten Start (nach Vorlage des Nutzers):
+//  links:  Farben oben (unter der Dateivorschau), Palette darunter bis unten
+//  rechts: Ebenen oben (ca. 70 % der Höhe), Verlauf darunter bis unten,
+//          Werkzeuge links neben dem Verlauf, unten bündig.
+void MainWindow::applyDefaultDockLayout() {
+    if (!m_colorDock || !m_paletteDock || !m_layerDock || !m_historyDock || !m_toolsDock)
+        return;
+    const QRect mg = geometry();
+    if (mg.width() < 600 || mg.height() < 400) return;
+
+    m_repositioning = true;
+    const int gap = 4;
+
+    int topBars = menuBar() ? menuBar()->height() : 0;
+    if (m_toolBar)     topBars += m_toolBar->height();
+    if (m_previewHost) topBars += m_previewHost->height();
+    const int statusH = statusBar() ? statusBar()->height() : 0;
+    const int top     = mg.top() + 6;
+    const int bottom  = mg.bottom() - statusH - gap;   // letzte nutzbare Zeile
+
+    // --- Links: Farben + Palette ------------------------------------
+    const int leftW = 252;
+    const int left  = mg.left() + 2;
+    const int colorTop = mg.top() + topBars + 8;
+    const int palMinH  = qMax(180, m_paletteDock->minimumHeight());
+    const int colorH = qBound(m_colorDock->minimumHeight(), 412,
+                              qMax(m_colorDock->minimumHeight(), bottom - colorTop - palMinH - 8));
+    m_colorDock->resize(leftW, colorH);
+    m_colorDock->move(left, colorTop);
+
+    const int palTop = colorTop + colorH + 8;
+    m_paletteDock->resize(leftW, qMax(palMinH, bottom - palTop + 1));
+    m_paletteDock->move(left, palTop);
+
+    // --- Rechts: Ebenen + Verlauf -----------------------------------
+    const int rightW = 330;
+    const int rightX = mg.right() - rightW - 1;
+    const int avail  = bottom - top + 1;
+    const int layerH = int(avail * 0.70);
+    m_layerDock->resize(rightW, layerH);
+    m_layerDock->move(rightX, top);
+
+    const int histTop = top + layerH + 6;
+    m_historyDock->resize(rightW, qMax(60, bottom - histTop + 1));
+    m_historyDock->move(rightX, histTop);
+
+    // --- Werkzeuge: links neben dem Verlauf, unten bündig ------------
+    const int toolsW = 205, toolsH = 205;
+    m_toolsDock->resize(toolsW, toolsH);
+    m_toolsDock->move(rightX - 12 - toolsW, bottom - toolsH + 1);
+
+    m_repositioning = false;
+    for (auto it = m_grips.constBegin(); it != m_grips.constEnd(); ++it)
+        if (auto* w = qobject_cast<QWidget*>(it.key())) repositionGrips(w);
+    storeDockRelativePositions();
+}
+
+// Speichert Position (relativ zum Hauptfenster), Größe und Einklapp-Zustand
+// jedes Fensters – beim nächsten Start wird genau diese Anordnung geladen.
+void MainWindow::saveDockLayout() {
+    storeDockRelativePositions();
+    QSettings st;
+    st.beginGroup("fenster");
+    st.setValue("version", kDockLayoutVersion);
+    for (const auto& nd : namedDocks()) {
+        QDockWidget* d = nd.second;
+        auto* tb = dynamic_cast<DockTitleBar*>(d->titleBarWidget());
+        const bool collapsed = tb && tb->collapsed();
+        const QSize size = tb ? tb->expandedSize() : d->size();
+        const QPointF rel = m_dockRelPos.value(d);
+        st.setValue(nd.first + "/relX", rel.x());
+        st.setValue(nd.first + "/relY", rel.y());
+        st.setValue(nd.first + "/size", size);
+        st.setValue(nd.first + "/eingeklappt", collapsed);
+    }
+    st.endGroup();
+}
+
+// Lädt die gespeicherte Anordnung. Liefert false, wenn (noch) keine
+// vollständige Anordnung gespeichert ist -> dann Standard-Anordnung.
+bool MainWindow::restoreDockLayout() {
+    QSettings st;
+    st.beginGroup("fenster");
+    if (st.value("version").toInt() != kDockLayoutVersion) return false;
+    for (const auto& nd : namedDocks())
+        if (!st.contains(nd.first + "/relX") || !st.contains(nd.first + "/size"))
+            return false;
+
+    m_repositioning = true;
+    for (const auto& nd : namedDocks()) {
+        QDockWidget* d = nd.second;
+        auto* tb = dynamic_cast<DockTitleBar*>(d->titleBarWidget());
+        if (tb) tb->setCollapsed(false);   // erst ausklappen, dann Größe setzen
+        const QSize size = st.value(nd.first + "/size").toSize();
+        if (size.isValid()) d->resize(size.expandedTo(d->minimumSize()));
+        m_dockRelPos[d] = QPointF(qBound(0.0, st.value(nd.first + "/relX").toDouble(), 1.0),
+                                  qBound(0.0, st.value(nd.first + "/relY").toDouble(), 1.0));
+        if (tb && st.value(nd.first + "/eingeklappt").toBool()) tb->setCollapsed(true);
+    }
+    st.endGroup();
+    m_repositioning = false;
+
+    // Ab jetzt gilt die Nutzer-Anordnung (proportional mitwandern).
+    setProperty("dockLayoutUser", true);
+    repositionDocksRelative();
+    return true;
+}
+
 // Erfasst die aktuelle Position jedes Docks als Bruchteil der
 // Hauptfenstergröße (0..1). So lassen sich die Fenster beim Resize
 // proportional mitbewegen.
@@ -776,7 +862,10 @@ void MainWindow::resizeEvent(QResizeEvent* e) {
     // Wenn das Hauptfenster vergroessert/verkleinert wird,
     // Docks proportional mitbewegen (sie bleiben an ihrer relativen Stelle).
     Q_UNUSED(e);
-    repositionDocksRelative();
+    // Solange der Nutzer nichts umgestellt hat, die Standard-Anordnung an
+    // die (endgültige) Fenstergröße anpassen – z.B. nach dem Maximieren.
+    if (property("dockLayoutUser").toBool()) repositionDocksRelative();
+    else                                     applyDefaultDockLayout();
 
     // Preview-Leiste (schwebendes Child-Widget) direkt unter dem ToolBar
     // positionieren. Die Breite wird an den tatsächlichen Inhalt
@@ -998,6 +1087,7 @@ void MainWindow::closeEvent(QCloseEvent* e) {
     // Beim Schließen die aktuelle Tastenbelegung sichern, damit sie
     // beim nächsten Start sofort wieder aktiv ist.
     saveShortcuts();
+    saveDockLayout();
     QMainWindow::closeEvent(e);
 }
 

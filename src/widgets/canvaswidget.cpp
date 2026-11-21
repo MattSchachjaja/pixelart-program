@@ -422,6 +422,21 @@ void CanvasWidget::enterEvent(QEnterEvent* event) {
     updateCursor();
 }
 
+// Während einer Text-Eingabe sind ALLE Shortcuts aus: Qt fragt vor jedem
+// Shortcut das Fokus-Widget per ShortcutOverride. Akzeptieren wir das,
+// wird kein Shortcut ausgelöst und die Taste kommt als normaler
+// Tastendruck beim Text-Werkzeug an (Buchstaben, Zahlen, Leertaste, ...).
+bool CanvasWidget::event(QEvent* e) {
+    if (e->type() == QEvent::ShortcutOverride) {
+        auto* t = m_tools ? dynamic_cast<TextTool*>(m_tools->active()) : nullptr;
+        if (t && t->isEditing()) {
+            e->accept();
+            return true;
+        }
+    }
+    return QOpenGLWidget::event(e);
+}
+
 void CanvasWidget::keyPressEvent(QKeyEvent* e) {
     // Delete-Taste: Auswahl-Inhalt löschen.
     // Wird direkt hier behandelt, damit es zuverlässig greift, sobald die

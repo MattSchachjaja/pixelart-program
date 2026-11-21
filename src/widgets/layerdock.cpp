@@ -214,8 +214,10 @@ void LayerRowWidget::updatePreview(const QImage& img, bool visible) {
             p.fillRect(x, y, 8, 8,
                        ((x / 8 + y / 8) % 2) ? QColor(60, 60, 60)
                                               : QColor(90, 90, 90));
-    // Versteckte Ebene: Preview bleibt leer (nur Schachbrett).
-    if (visible && !img.isNull()) {
+    // Inhalt IMMER anzeigen – auch bei ausgeblendeten oder von oberen
+    // Ebenen verdeckten Zeichnungen sieht man so, was auf welcher Ebene ist.
+    Q_UNUSED(visible);
+    if (!img.isNull()) {
         // Auf den bemalten Bereich zoomen: kleine Zeichnungen werden
         // vergroessert dargestellt, damit man alles gut erkennt.
         const QRect bounds = layerContentBounds(img);

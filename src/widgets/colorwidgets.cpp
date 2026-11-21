@@ -15,6 +15,7 @@
 #include <QHBoxLayout>
 #include <QGridLayout>
 #include <QApplication>
+#include <QFontMetrics>
 
 // ===================================================================
 // ColorPicker — skalierbarer HSV-Farbwähler
@@ -22,7 +23,7 @@
 ColorPicker::ColorPicker(ColorState* state, QWidget* parent)
     : QWidget(parent), m_state(state)
 {
-    setMinimumSize(100, 120);
+    setMinimumSize(100, 90);
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     setMouseTracking(true);
     setCursor(Qt::CrossCursor);
@@ -38,25 +39,43 @@ ColorPicker::ColorPicker(ColorState* state, QWidget* parent)
     updateFromColor(m_state->activeColor());
 }
 
+// Geometrie: Farbton-Balken oben, darunter das Sättigung/Helligkeit-Feld.
+// Das Feld ist NICHT mehr zwingend quadratisch, sondern nutzt die
+// verfügbare Höhe – so bleibt das Farben-Fenster kompakt.
+static constexpr int kPickMargin = 4;
+static constexpr int kHueBarH    = 16;
+static constexpr int kHueGap     = 8;   // Platz für die Hue-Marker
+
+QRectF ColorPicker::hueRect() const {
+    return QRectF(kPickMargin, kPickMargin + 6,
+                  qMax(1, width() - 2 * kPickMargin), kHueBarH);
+}
+
+QRectF ColorPicker::svRect() const {
+    const qreal top = kPickMargin + 6 + kHueBarH + kHueGap;
+    return QRectF(kPickMargin, top,
+                  qMax(1, width() - 2 * kPickMargin),
+                  qMax<qreal>(20, height() - top - kPickMargin));
+}
+
 void ColorPicker::resizeEvent(QResizeEvent*) {
     rebuildSvImage();
 }
 
 void ColorPicker::rebuildSvImage() {
-    const int margin = 4;
-    const int barH = 22;
-    const int w = width() - margin * 2;
-    const int svSize = w;
-    if (svSize <= 0) return;
+    const QRect r = svRect().toRect();
+    const int w = r.width(), h = r.height();
+    if (w <= 0 || h <= 0) return;
 
-    m_svCache = QImage(svSize, svSize, QImage::Format_RGB32);
-    for (int y = 0; y < svSize; ++y) {
-        for (int x = 0; x < svSize; ++x) {
-            float s = float(x) / qMax(1, svSize - 1);
-            float v = float(svSize - 1 - y) / qMax(1, svSize - 1);
+    m_svCache = QImage(w, h, QImage::Format_RGB32);
+    for (int y = 0; y < h; ++y) {
+        const float v = float(h - 1 - y) / qMax(1, h - 1);
+        QRgb* line = reinterpret_cast<QRgb*>(m_svCache.scanLine(y));
+        for (int x = 0; x < w; ++x) {
+            const float s = float(x) / qMax(1, w - 1);
             // Qts native HSV-Konvertierung verwenden, damit die angezeigte
             // Farbe exakt mit der gezeichneten Farbe übereinstimmt.
-            m_svCache.setPixel(x, y, QColor::fromHsvF(m_h / 360.0f, s, v).rgb());
+            line[x] = QColor::fromHsvF(m_h / 360.0f, s, v).rgb();
         }
     }
     m_cachedHue = m_h;
@@ -65,59 +84,50 @@ void ColorPicker::rebuildSvImage() {
 void ColorPicker::paintEvent(QPaintEvent*) {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
+    if (width() <= 2 * kPickMargin) return;
 
-    const int margin = 4;
-    const int barH = 22;
-    const int w = width() - margin * 2;
-    if (w <= 0) return;
+    const QRectF hr = hueRect();
+    const QRectF sr = svRect();
 
-    QRectF hueRect(margin, margin, w, barH);
-    const int svSize = w;
-    QRectF svRect(margin, margin + barH + 6, svSize, svSize);
-
-    // SV-Cache bei Hue-Aenderung neu aufbauen (nur wenn noetig)
-    if (qAbs(m_h - m_cachedHue) > 0.01f) {
+    // SV-Cache bei Hue- oder Größenänderung neu aufbauen (nur wenn nötig).
+    if (qAbs(m_h - m_cachedHue) > 0.01f || m_svCache.size() != sr.toRect().size())
         rebuildSvImage();
-    }
 
-    // Farbbalken (Hue).
-    // WICHTIG: Hue muss 0..359 sein (QColor::fromHsv lehnt 360 ab und
-    // erzeugt eine UNGÜLTIGE Farbe → "out of range"-Warnung + falsche
-    // Anzeige am rechten Rand). Mit % 360 wird 360° korrekt zu 0° (Rot).
-    QLinearGradient hueGrad(hueRect.left(), 0, hueRect.right(), 0);
+    // Farbbalken (Hue). Hue muss 0..359 sein (360 wäre ungültig).
+    QLinearGradient hueGrad(hr.left(), 0, hr.right(), 0);
     for (int i = 0; i <= 12; ++i)
         hueGrad.setColorAt(i / 12.0, QColor::fromHsv((int(i * 360 / 12)) % 360, 255, 255));
     p.setBrush(hueGrad);
     p.setPen(QPen(QColor(0, 0, 0, 80), 1));
-    p.drawRoundedRect(hueRect, 3, 3);
+    p.drawRoundedRect(hr, 3, 3);
 
-    // Hue-Marker.
+    // Hue-Marker (Dreiecke über und unter dem Balken).
     {
-        qreal x = hueRect.left() + (m_h / 360.0f) * hueRect.width();
+        const qreal x = hr.left() + (m_h / 360.0f) * hr.width();
         QPainterPath tri;
-        tri.moveTo(x, hueRect.top() - 2);
-        tri.lineTo(x - 5, hueRect.top() - 9);
-        tri.lineTo(x + 5, hueRect.top() - 9);
+        tri.moveTo(x, hr.top() - 1);
+        tri.lineTo(x - 4, hr.top() - 6);
+        tri.lineTo(x + 4, hr.top() - 6);
         tri.closeSubpath();
+        QPainterPath tri2;
+        tri2.moveTo(x, hr.bottom() + 1);
+        tri2.lineTo(x - 4, hr.bottom() + 6);
+        tri2.lineTo(x + 4, hr.bottom() + 6);
+        tri2.closeSubpath();
         p.setBrush(Qt::black);
         p.setPen(QPen(Qt::white, 1));
         p.drawPath(tri);
-        QPainterPath tri2;
-        tri2.moveTo(x, hueRect.bottom() + 2);
-        tri2.lineTo(x - 5, hueRect.bottom() + 9);
-        tri2.lineTo(x + 5, hueRect.bottom() + 9);
-        tri2.closeSubpath();
         p.drawPath(tri2);
     }
 
-    // SV-Quadrat (aus Cache).
+    // SV-Feld (aus Cache).
     if (!m_svCache.isNull())
-        p.drawImage(svRect, m_svCache);
+        p.drawImage(sr, m_svCache);
 
     // SV-Cursor.
     {
-        qreal cx = svRect.left() + m_s * svRect.width();
-        qreal cy = svRect.top()  + (1.0 - m_v) * svRect.height();
+        const qreal cx = sr.left() + m_s * sr.width();
+        const qreal cy = sr.top()  + (1.0 - m_v) * sr.height();
         p.setBrush(Qt::NoBrush);
         p.setPen(QPen(Qt::white, 2));
         p.drawEllipse(QPointF(cx, cy), 6, 6);
@@ -130,41 +140,32 @@ void ColorPicker::paintEvent(QPaintEvent*) {
 
 void ColorPicker::mousePressEvent(QMouseEvent* e) {
     if (e->button() != Qt::LeftButton) return;
+    const QPointF pos = e->position();
+    // Hue-Bereich großzügig (inkl. Marker-Zone) treffen lassen.
+    const QRectF hueHit = hueRect().adjusted(0, -6, 0, kHueGap / 2);
 
-    const int margin = 4;
-    const int barH = 22;
-    const int w = width() - margin * 2;
-    QRectF hueRect(margin, margin, w, barH);
-    QRectF svRect(margin, margin + barH + 6, w, w);
-    QPointF pos = e->pos();
-
-    // Herausfinden, in welchem Bereich geklickt wurde,
-    // und das Drag-Ziel einmalig festlegen.
-    if (hueRect.contains(pos)) {
+    if (hueHit.contains(pos)) {
         m_dragTarget = Hue;
         // Drag beginnt -> Farbänderungen werden zu EINEM Command
         // zusammengefasst (siehe endColorChange in mouseReleaseEvent).
         m_state->beginColorChange();
         handleHueDrag(pos);
-    } else if (svRect.contains(pos)) {
+    } else if (svRect().adjusted(-3, -3, 3, 3).contains(pos)) {
         m_dragTarget = SV;
         m_state->beginColorChange();
         handleSvDrag(pos);
     }
-    // Klick ausserhalb beider Bereiche -> nichts tun
 }
 
 void ColorPicker::mouseMoveEvent(QMouseEvent* e) {
     if (m_dragTarget == None) return;
-
-    QPointF pos = e->pos();
-    if (m_dragTarget == Hue)
-        handleHueDrag(pos);
-    else if (m_dragTarget == SV)
-        handleSvDrag(pos);
+    const QPointF pos = e->position();
+    if (m_dragTarget == Hue) handleHueDrag(pos);
+    else                     handleSvDrag(pos);
 }
 
 void ColorPicker::mouseReleaseEvent(QMouseEvent*) {
+    if (m_dragTarget == None) return;
     m_dragTarget = None;
     // Drag beendet -> falls sich die Farbe geändert hat, wird jetzt
     // ein einzelnes Command gepusht (vorher → nachher).
@@ -174,43 +175,25 @@ void ColorPicker::mouseReleaseEvent(QMouseEvent*) {
 // --- Getrennte Handler fuer Hue und SV ------------------------------
 
 void ColorPicker::handleHueDrag(const QPointF& pos) {
-    const int margin = 4;
-    const int w = width() - margin * 2;
-    if (w <= 0) return;
-
-    float ratio = float((pos.x() - margin) / w);
+    const QRectF hr = hueRect();
+    const float ratio = float((pos.x() - hr.left()) / hr.width());
     m_h = qBound(0.0f, ratio * 360.0f, 359.9f);
-
-    // Signal-Rueckkopplung blockieren, damit updateFromColor
-    // nicht m_s und m_v ueberschreibt.
+    // Signal-Rückkopplung blockieren, damit updateFromColor
+    // nicht m_s und m_v überschreibt.
     m_selfUpdate = true;
     emitColor();
     m_selfUpdate = false;
-
     update();
 }
 
 void ColorPicker::handleSvDrag(const QPointF& pos) {
-    const int margin = 4;
-    const int barH = 22;
-    const int w = width() - margin * 2;
-    if (w <= 0) return;
-
-    const int svSize = w;
-    const float svLeft = float(margin);
-    const float svTop  = float(margin + barH + 6);
-
-    // Auch wenn die Maus ausserhalb des Quadrats ist,
-    // den Wert auf 0..1 begrenzen (kein Bereichswechsel!).
-    m_s = qBound(0.0f, float((pos.x() - svLeft) / svSize), 1.0f);
-    m_v = qBound(0.0f, float(1.0 - (pos.y() - svTop) / svSize), 1.0f);
-
-    // Signal-Rueckkopplung blockieren, damit updateFromColor
-    // nicht m_h durch Fließkomma-Ungenauigkeit veraendert.
+    const QRectF sr = svRect();
+    // Auch außerhalb des Feldes auf 0..1 begrenzen (kein Bereichswechsel).
+    m_s = qBound(0.0f, float((pos.x() - sr.left()) / sr.width()), 1.0f);
+    m_v = qBound(0.0f, float(1.0 - (pos.y() - sr.top()) / sr.height()), 1.0f);
     m_selfUpdate = true;
     emitColor();
     m_selfUpdate = false;
-
     update();
 }
 
@@ -347,12 +330,19 @@ ColorDock::ColorDock(ColorState* state, QWidget* parent)
     // feste Palette mit gängigen Standardfarben zum schnellen Wählen.
     auto* content = new QWidget();
     auto* outer = new QVBoxLayout(content);
-    outer->setContentsMargins(8, 10, 8, 8);
-    outer->setSpacing(6);
+    outer->setContentsMargins(8, 6, 8, 8);
+    outer->setSpacing(4);
 
     // --- Transparenz-Slider ---
     auto* alphaRow = new QHBoxLayout();
     alphaRow->setContentsMargins(0, 0, 0, 0);
+
+    // Beide Regler-Beschriftungen gleich breit -> Regler bündig untereinander.
+    const int titleW = QFontMetrics(font()).horizontalAdvance("Helligkeit:") + 4;
+    auto* alphaTitle = new QLabel("Deckkraft:", this);
+    alphaTitle->setStyleSheet("color:#aaa;");
+    alphaTitle->setFixedWidth(titleW);
+    alphaRow->addWidget(alphaTitle);
 
     m_alphaSlider = new QSlider(Qt::Horizontal, this);
     m_alphaSlider->setRange(0, 255);
@@ -397,6 +387,7 @@ ColorDock::ColorDock(ColorState* state, QWidget* parent)
 
     auto* briTitle = new QLabel("Helligkeit:", this);
     briTitle->setStyleSheet("color:#aaa;");
+    briTitle->setFixedWidth(titleW);
     briRow->addWidget(briTitle);
 
     m_briSlider = new QSlider(Qt::Horizontal, this);
@@ -475,6 +466,7 @@ ColorDock::ColorDock(ColorState* state, QWidget* parent)
     for (const QColor& c : palette) {
         auto* sw = new PaletteSwatch(c, this);
         connect(sw, &PaletteSwatch::picked, m_state, &ColorState::setActiveColor);
+        sw->setFixedHeight(20);   // kompakt: feste Zeilenhöhe
         palGrid->addWidget(sw, row, col);
         if (++col >= 10) { col = 0; ++row; }
     }
@@ -487,7 +479,9 @@ ColorDock::ColorDock(ColorState* state, QWidget* parent)
     // Früher wurde hier ein Aspect-Ratio erzwungen; das hat aber mit dem
     // Einklapp-Mechanismus kollidiert (das Dock hat beim Ausklappen die
     // gespeicherte Höhe überschrieben). Daher nur noch min-Größe.
-    setMinimumSize(220, 430);
+    // Kompakt: der Farbwähler nutzt die verfügbare Höhe, muss aber nicht
+    // mehr quadratisch sein -> deutlich geringere Mindesthöhe.
+    setMinimumSize(200, 240);
     setMaximumWidth(440);
 
     // --- ColorState-Signal -> Alpha- und Helligkeits-Slider aktuell halten ---
@@ -514,5 +508,5 @@ ColorDock::ColorDock(ColorState* state, QWidget* parent)
 }
 
 QSize ColorDock::sizeHint() const {
-    return QSize(260, 470);
+    return QSize(280, 300);
 }

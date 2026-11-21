@@ -62,6 +62,7 @@ protected:
     void wheelEvent(QWheelEvent* e) override;
     void enterEvent(QEnterEvent* event) override;  // neu für Cursor
     void keyPressEvent(QKeyEvent* e) override;     // Text-Eingabe weiterreichen
+    bool event(QEvent* e) override;                // Shortcuts beim Tippen aus
 
 private:
     void centerDocument();

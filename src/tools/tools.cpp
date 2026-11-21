@@ -60,6 +60,19 @@ static QImage scaleAlphaMaskSmooth(const QImage& src, const QSize& dstSize) {
     return result;
 }
 
+// Legt eine (premultiplied) Farbe über einen vorhandenen Pixel (SourceOver).
+// So ÜBERZEICHNET eine halbtransparente Farbe die Pixel darunter, statt sie
+// zu ersetzen. Bei voller Deckkraft ergibt das genau die Farbe selbst.
+static inline QRgb blendOver(QRgb src, QRgb dst) {
+    const int inv = 255 - qAlpha(src);
+    if (inv == 0) return src;
+    auto ch = [inv](int s, int d) { return qMin(255, s + (d * inv + 127) / 255); };
+    return qRgba(ch(qRed(src),   qRed(dst)),
+                 ch(qGreen(src), qGreen(dst)),
+                 ch(qBlue(src),  qBlue(dst)),
+                 ch(qAlpha(src), qAlpha(dst)));
+}
+
 static QImage polygonToMask(const QPolygonF& poly, int w, int h) {
     QImage mask(w, h, QImage::Format_Alpha8);
     mask.fill(0);
@@ -175,7 +188,12 @@ void PencilTool::plot(int x, int y) {
         const int newB = qRound(qBlue(cur)  * keep);
         bits[idx] = qRgba(newR, newG, newB, newA);
     } else {
-        bits[idx] = m_penColor;
+        // Über den Pixel-Zustand VOR dem Strich legen: halbtransparente
+        // Farben überzeichnen (statt zu ersetzen), und ein Pixel, der im
+        // selben Strich mehrfach getroffen wird, wird nicht immer dunkler.
+        const QRgb under = reinterpret_cast<const QRgb*>(m_beforeFull.constBits())
+            [y * (m_beforeFull.bytesPerLine() / 4) + x];
+        bits[idx] = blendOver(m_penColor, under);
     }
     growDirty(QRect(x, y, 1, 1));
 }
@@ -781,7 +799,8 @@ bool FillTool::mousePress(const QPointF& docPos, Qt::MouseButton button, Qt::Key
                 const int newB = qRound(qBlue(cur)  * keep);
                 irow[x] = qRgba(newR, newG, newB, newA);
             } else {
-                irow[x] = prem;
+                // Halbtransparente Füllfarbe überzeichnet die Pixel.
+                irow[x] = blendOver(prem, irow[x]);
             }
         }
     }
@@ -1249,12 +1268,15 @@ void FormTool::mouseRelease(const QPointF&, Qt::MouseButton button) {
     }
     // Gefüllt → nur Füllung, kein Rand (Dicke hat dann keinen Einfluss).
     // Nicht gefüllt → nur Rand mit der eingestellten Dicke.
-    if (m_filled) {
+    // Linie hat keine Fläche -> immer mit Stift (Dicke) zeichnen, auch wenn
+    // "Gefüllt" aktiv ist. (Früher: Gefüllt = kein Stift -> Linie unsichtbar.)
+    if (m_filled && m_mode != Line) {
         painter.setPen(Qt::NoPen);
         painter.setBrush(QBrush(col));
     } else {
         QPen pen(col, m_strokeWidth);
         pen.setJoinStyle(Qt::MiterJoin);
+        pen.setCapStyle(Qt::SquareCap);   // Endpixel der Linie vollständig
         painter.setPen(pen);
         painter.setBrush(Qt::NoBrush);
     }
@@ -1280,7 +1302,9 @@ void FormTool::mouseRelease(const QPointF&, Qt::MouseButton button) {
             painter.drawPolygon(tri);
             break;
         }
-        case Line:      painter.drawLine(m_start, m_end); break;
+        // Linie durch die Pixel-MITTEN von Start- und Endpixel.
+        case Line:      painter.drawLine(m_start + QPointF(0.5, 0.5),
+                                         m_end   + QPointF(0.5, 0.5)); break;
     }
     painter.end();
     emit m_doc->changed();
@@ -1306,7 +1330,7 @@ void FormTool::paintOverlay(QPainter& painter) const {
         // Echte Formvorschau: sichtbar in Farbe, Strichdicke und Füllung,
         // exakt wie sie beim Loslassen gezeichnet wird.
         QColor col = m_colors->activeColor();
-        if (m_filled) {
+        if (m_filled && m_mode != Line) {
             painter.setPen(Qt::NoPen);
             painter.setBrush(QBrush(col));
         } else {
@@ -1328,7 +1352,8 @@ void FormTool::paintOverlay(QPainter& painter) const {
             painter.drawPolygon(tri);
             break;
         }
-        case Line: painter.drawLine(m_start, m_end); break;
+        case Line: painter.drawLine(m_start + QPointF(0.5, 0.5),
+                                    m_end   + QPointF(0.5, 0.5)); break;
     }
 }
 

@@ -19,7 +19,7 @@ class ColorPicker : public QWidget {
     Q_OBJECT
 public:
     explicit ColorPicker(ColorState* state, QWidget* parent = nullptr);
-    QSize sizeHint() const override { return QSize(200, 220); }
+    QSize sizeHint() const override { return QSize(200, 150); }
 
 protected:
     void paintEvent(QPaintEvent*) override;
@@ -30,6 +30,8 @@ protected:
 
 private:
     void rebuildSvImage();
+    QRectF hueRect() const;   // Farbton-Balken
+    QRectF svRect() const;    // Sättigung/Helligkeit-Feld
     void handleHueDrag(const QPointF& pos);
     void handleSvDrag(const QPointF& pos);
     void emitColor();

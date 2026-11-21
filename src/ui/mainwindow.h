@@ -102,6 +102,10 @@ private:
     void repositionGrips(QWidget* dock);
     void addMinimizeButton(QDockWidget* dock);   // eigene Titelleiste mit Min-Button
     void storeDockRelativePositions();   // relative Dock-Positionen erfassen
+    void applyDefaultDockLayout();       // Standard-Anordnung der Fenster
+    void saveDockLayout();               // Anordnung beim Schließen sichern
+    bool restoreDockLayout();            // gespeicherte Anordnung laden
+    QList<QPair<QString, QDockWidget*>> namedDocks() const;
     void repositionDocksRelative();      // Docks proportional zur Fenstergröße setzen
 
     // --- Multi-Document (Session-Verwaltung) ---
