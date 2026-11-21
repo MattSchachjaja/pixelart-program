@@ -1196,6 +1196,18 @@ void MainWindow::pasteClipboard() {
                      (m_doc->height() - img.height()) / 2);
     }
 
+    // Eingefügtes immer im Bereich der Leinwand platzieren: Die gemerkte
+    // Ursprungsposition stammt evtl. aus einer GRÖSSEREN Datei und läge in
+    // einer kleinen Datei weit außerhalb. Daher so verschieben, dass das
+    // Bild komplett auf der Leinwand liegt. Ist das Bild größer als die
+    // Leinwand, wird es oben links bündig angelegt (Ecke sichtbar).
+    {
+        const int maxX = m_doc->width()  - img.width();
+        const int maxY = m_doc->height() - img.height();
+        pos.setX(maxX >= 0 ? qBound(0, pos.x(), maxX) : 0);
+        pos.setY(maxY >= 0 ? qBound(0, pos.y(), maxY) : 0);
+    }
+
     // Schwebenden Buffer setzen (liegt über der Ebene, Ebene bleibt unangetastet).
     m_doc->setPasteBuffer(img, pos);
 
