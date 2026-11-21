@@ -35,10 +35,16 @@ class LayerRowWidget : public QFrame {
 public:
     explicit LayerRowWidget(int index, Layer* layer, QWidget* parent = nullptr);
 
-    void updatePreview(const QImage& img);
+    void updatePreview(const QImage& img, bool visible);
     void setActive(bool a);
     void setIndex(int i) { m_index = i; }
     int  displayIndex() const { return m_index; }
+
+    // Inline-Umbenennung: Zustand abfragen/fortsetzen (ueberlebt rebuild).
+    bool    isRenaming() const;
+    QString renameText() const;
+    int     renameCursor() const;
+    void    resumeRename(const QString& text, int cursorPos);
 
     // Kleine Info-Zeile unten in der Zeile aktualisieren
     // (Sperre + Transparenz).

@@ -25,6 +25,33 @@ ColorState::ColorState(QObject* parent) : QObject(parent) {
     };
     for (const char* hex : aap64)
         m_slots.append(QColor(hex));
+    resetRowSizes();
+}
+
+bool ColorState::rowsValid(const QVector<int>& rows) const {
+    if (rows.isEmpty() || rows.last() != 0) return false;
+    int sum = 0;
+    for (int r : rows) { if (r < 0) return false; sum += r; }
+    return sum == m_slots.size();
+}
+
+QVector<int> ColorState::defaultRows() const {
+    QVector<int> rows;
+    int total = m_slots.size();
+    while (total >= kDefaultColumns) { rows.append(kDefaultColumns); total -= kDefaultColumns; }
+    if (total > 0) rows.append(total);
+    rows.append(0);   // leere Schluss-Zeile
+    return rows;
+}
+
+void ColorState::resetRowSizes() {
+    m_rowSizes = defaultRows();
+    emit rowSizesChanged();
+}
+
+void ColorState::setRowSizes(const QVector<int>& rows) {
+    if (rowsValid(rows)) { m_rowSizes = rows; emit rowSizesChanged(); }
+    else resetRowSizes();
 }
 
 void ColorState::setActiveSlot(int i) {
@@ -62,21 +89,22 @@ void ColorState::addSlot(const QColor& c) {
     insertSlot(m_slots.size(), c);
 }
 
-void ColorState::insertSlot(int index, const QColor& c) {
+void ColorState::insertSlot(int index, const QColor& c, const QVector<int>& rowsAfter) {
     if (!c.isValid()) return;
+    index = qBound(0, index, int(m_slots.size()));
     if (m_history && m_recordHistory && !m_inChange)
-        m_history->push(new ColorInsertCommand(this, index, c));
+        m_history->push(new ColorInsertCommand(this, index, c, m_rowSizes, rowsAfter));
     else
-        doInsertSlot(index, c);
+        doInsertSlot(index, c, rowsAfter);
 }
 
-void ColorState::removeSlot(int i) {
+void ColorState::removeSlot(int i, const QVector<int>& rowsAfter) {
     if (m_slots.isEmpty()) return;
     if (i < 0 || i >= m_slots.size()) return;
     if (m_history && m_recordHistory && !m_inChange)
-        m_history->push(new ColorRemoveCommand(this, i, m_slots[i]));
+        m_history->push(new ColorRemoveCommand(this, i, m_slots[i], m_rowSizes, rowsAfter));
     else
-        doRemoveSlot(i);
+        doRemoveSlot(i, rowsAfter);
 }
 
 void ColorState::beginColorChange() {
@@ -100,10 +128,11 @@ void ColorState::doSetSlot(int i, const QColor& c) {
     if (m_slots[i] == c) return;
     m_slots[i] = c;
     if (i == m_active) emit activeColorChanged(c);
+    emit slotColorChanged(i, c);
     emit slotsChanged();
 }
 
-void ColorState::doInsertSlot(int index, const QColor& c) {
+void ColorState::doInsertSlot(int index, const QColor& c, const QVector<int>& rows) {
     if (!c.isValid()) return;
     if (index < 0) index = 0;
     if (index > m_slots.size()) index = m_slots.size();
@@ -112,10 +141,13 @@ void ColorState::doInsertSlot(int index, const QColor& c) {
         m_active = 0;
     else if (index <= m_active)
         m_active++;
+    // Zeilenstruktur: vorgegeben (Verlauf/Palette) oder Standard.
+    m_rowSizes = rowsValid(rows) ? rows : defaultRows();
+    emit slotInserted(index);
     emit slotsChanged();
 }
 
-void ColorState::doRemoveSlot(int i) {
+void ColorState::doRemoveSlot(int i, const QVector<int>& rows) {
     if (m_slots.isEmpty()) return;
     if (i < 0 || i >= m_slots.size()) return;
     m_slots.removeAt(i);
@@ -125,6 +157,8 @@ void ColorState::doRemoveSlot(int i) {
         m_active--;
     else if (m_active >= m_slots.size())
         m_active = m_slots.size() - 1;
+    m_rowSizes = rowsValid(rows) ? rows : defaultRows();
+    emit slotRemoved(i);
     emit slotsChanged();
     emit activeSlotChanged(m_active);
     if (m_active >= 0)

@@ -32,8 +32,18 @@ public:
     void setActiveColor(const QColor& c);
     void setSlot(int i, const QColor& c);
     void addSlot(const QColor& c);
-    void insertSlot(int index, const QColor& c);
-    void removeSlot(int i);
+    // rowsAfter: Zeilenstruktur der Palette NACH der Änderung (optional).
+    // Wird im Verlaufsschritt mitgespeichert, damit Undo/Redo den Slot
+    // exakt in seine alte Zeile zurücklegt (statt neu einzusortieren).
+    void insertSlot(int index, const QColor& c, const QVector<int>& rowsAfter = {});
+    void removeSlot(int i, const QVector<int>& rowsAfter = {});
+
+    // Zeilenstruktur der Palette: Anzahl Slots pro Zeile. Die letzte Zeile
+    // ist immer leer (0). Summe == slotCount().
+    QVector<int> rowSizes() const { return m_rowSizes; }
+    void setRowSizes(const QVector<int>& rows);   // ungültig -> Standard
+    void resetRowSizes();                         // Standard: 8 pro Zeile
+    static constexpr int kDefaultColumns = 8;
 
     // History-Anbindung. Wenn nicht gesetzt, werden keine Commands
     // gepusht (z.B. vor Programmstart / beim Laden).
@@ -51,6 +61,13 @@ signals:
     void activeColorChanged(const QColor&);
     void activeSlotChanged(int);
     void slotsChanged();
+    // Feingranulare Meldungen fuer die Palette: erlauben Updates ohne
+    // Neu-Sortierung der Zeilen (wichtig fuer Undo/Redo).
+    void slotColorChanged(int index, const QColor& color);
+    void slotInserted(int index);
+    void slotRemoved(int index);
+    // Zeilenstruktur hat sich geändert (Palette neu aufbauen).
+    void rowSizesChanged();
 
 private:
     friend class ColorChangeCommand;
@@ -60,10 +77,13 @@ private:
     // Führen die eigentliche Änderung aus OHNE ein Command zu pushen.
     // Werden von den Commands (execute/undo) aufgerufen.
     void doSetSlot(int i, const QColor& c);
-    void doInsertSlot(int index, const QColor& c);
-    void doRemoveSlot(int i);
+    void doInsertSlot(int index, const QColor& c, const QVector<int>& rows = {});
+    void doRemoveSlot(int i, const QVector<int>& rows = {});
+    bool rowsValid(const QVector<int>& rows) const;
+    QVector<int> defaultRows() const;
 
     QVector<QColor> m_slots;
+    QVector<int>    m_rowSizes;
     int             m_active = 0;
     History*        m_history = nullptr;
     bool            m_recordHistory = true;

@@ -44,8 +44,9 @@ public:
     int slotAt(int row, int col) const;
 
 private:
-    void recomputeRowSizesDefault();   // m_rowSizes aus flacher Liste neu aufbauen
+    void recomputeRowSizesDefault();   // Standard-Zeilen im ColorState setzen
     void rebuildRows();                // gesamtes UI neu aufbauen
+    void updateActiveRow();            // m_activeRow aus aktivem Slot ableiten
     int  computeInsertIndex(int rowIndex) const;
     int  computeRemoveIndex(int rowIndex, int posInRow) const;
     void addSlotAtEndOfRow(int rowIndex);
@@ -60,9 +61,12 @@ private:
     QScrollArea*           m_scroll     = nullptr;
     QWidget*               m_rowsHost    = nullptr;
     QVBoxLayout*           m_rowsLayout  = nullptr;
-    QVector<int>           m_rowSizes;  // Slots pro Zeile (letzte ist immer 0)
+    // Slots pro Zeile (letzte ist immer 0). Spiegel von ColorState::rowSizes()
+    // – die Zeilenstruktur gehoert dem ColorState, damit Undo/Redo sie
+    // exakt wiederherstellen kann.
+    QVector<int>           m_rowSizes;
     QVector<ColorSwatch*>  m_swatches;  // flach, parallel zu ColorState-Slots
     int                    m_columns    = 8;
     int                    m_activeRow  = 0;   // Zeile des aktiven Slots
-    bool                   m_internalChange = false;  // unterdrückt slotsChanged-Callback
+    bool                   m_internalChange = false;  // unterdrückt Rebuild-Callbacks
 };

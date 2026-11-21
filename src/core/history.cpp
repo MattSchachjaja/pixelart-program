@@ -42,3 +42,10 @@ void History::jumpTo(int target) {
 QString History::nameAt(int i) const {
     return (i >= 0 && i < m_stack.size()) ? m_stack[i]->name() : QString();
 }
+
+void History::loadStack(QList<ICommand*> cmds, int current) {
+    clear();
+    m_stack = cmds;
+    m_current = qBound(0, current, m_stack.size());
+    emit changed();
+}

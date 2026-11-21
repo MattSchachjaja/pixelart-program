@@ -40,6 +40,7 @@ public:
     void mergeLayerDown(int i);
     void paintOnActiveLayer(std::function<void(QPainter&)> fn);
     void resize(int newW, int newH);
+    void flip(bool horizontal, bool vertical);   // alle Ebenen + Auswahl spiegeln
     void loadFromImage(const QImage& img);
     QImage composite() const;
 

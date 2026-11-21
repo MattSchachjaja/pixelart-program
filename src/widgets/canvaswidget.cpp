@@ -127,8 +127,23 @@ void CanvasWidget::initializeGL() {
         "out vec4 frag;\n"
         "uniform sampler2D u_tex;\n"
         "uniform vec2 u_checkerCount;\n"
+        "uniform vec2 u_texSize;\n"
+        "uniform float u_zoom;\n"
         "void main(){\n"
-        "    vec4 tex = texture(u_tex, v_uv);\n"
+        // Pixel-perfektes Sampling:
+        //  - Zoom >= 100%: Bildschirm-Pixelmitte -> liegt nie auf einer
+        //    Dokument-Pixelgrenze (Pan ganzzahlig, Zoom ganzzahlig).
+        //  - Zoom <  100%: Jeder Bildschirm-Pixel zeigt den Dokument-Pixel
+        //    an seiner linken oberen Ecke (+0.5 Dok-Pixel Sicherheitsabstand,
+        //    damit Rundungsfehler nie zum Nachbarpixel springen).
+        // Dadurch bleiben Pixel beim Zurückzoomen an ihrer originalen
+        // Position (kein optisches Verschieben/Flackern) und behalten ihre
+        // Originalfarbe (Nearest, kein Verwischen).
+        "    float z = max(u_zoom, 0.0001);\n"
+        "    vec2 pix = floor(v_uv * u_texSize - max(0.0, 0.5 / z - 0.5));\n"
+        "    pix = clamp(pix, vec2(0.0), u_texSize - 1.0);\n"
+        "    vec2 uv = (pix + 0.5) / u_texSize;\n"
+        "    vec4 tex = texture(u_tex, uv);\n"
         "    vec2 ch = floor(v_uv * u_checkerCount);\n"
         "    float c = mod(ch.x + ch.y, 2.0);\n"
         "    vec3 c1 = vec3(60.0/255.0);\n"
@@ -197,6 +212,9 @@ void CanvasWidget::paintGL() {
     // Karomuster: 8 Dokument-Pixel pro Quadrat (wie in der Vorschau).
     m_prog->setUniformValue("u_checkerCount",
         QVector2D(m_doc->width() / 8.0f, m_doc->height() / 8.0f));
+    m_prog->setUniformValue("u_texSize",
+        QVector2D(float(m_doc->width()), float(m_doc->height())));
+    m_prog->setUniformValue("u_zoom", m_zoom);
     m_vao.bind();
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     m_vao.release();
@@ -210,7 +228,9 @@ void CanvasWidget::paintGL() {
         // aktiv ist. Bei anderen Werkzeugen bleibt sie ausgeblendet.
         if (isSelectionToolActive() && !m_selectionOverlay.isNull()) {
             QPainter painter(this);
-            painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+            // Keine Glättung: die Auswahl-Einfärbung soll exakt auf den
+            // Pixelgrenzen liegen (auch beim Zurückzoomen).
+            painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
             QRectF target(m_pan.x(), m_pan.y(),
                           m_doc->width() * m_zoom, m_doc->height() * m_zoom);
             QRectF source(0, 0, m_doc->width(), m_doc->height());

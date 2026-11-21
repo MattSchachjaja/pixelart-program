@@ -24,6 +24,103 @@
 #include <QMenu>
 #include <QTimer>
 
+// Begrenzungsrechteck aller nicht-transparenten Pixel einer Ebene.
+// Leeres QRect, wenn nichts gemalt wurde.
+static QRect layerContentBounds(const QImage& img) {
+    if (img.isNull()) return QRect();
+    const QImage argb = (img.format() == QImage::Format_ARGB32_Premultiplied)
+        ? img : img.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    const int w = argb.width(), h = argb.height();
+    int minX = w, minY = h, maxX = -1, maxY = -1;
+    for (int y = 0; y < h; ++y) {
+        const QRgb* row = reinterpret_cast<const QRgb*>(argb.constScanLine(y));
+        for (int x = 0; x < w; ++x) {
+            if (qAlpha(row[x]) != 0) {
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+            }
+        }
+    }
+    if (maxX < 0) return QRect();
+    // Kleiner Rand, damit der Inhalt nicht am Preview-Rand klebt.
+    QRect b(minX, minY, maxX - minX + 1, maxY - minY + 1);
+    return b.adjusted(-1, -1, 1, 1).intersected(QRect(0, 0, w, h));
+}
+
+// ===================================================================
+// LayerNameLabel — Ebenenname über max. 2 Zeilen, immer lesbar
+// ===================================================================
+// Ein normales QLabel mit wordWrap bricht nur an Leerzeichen um und
+// berechnet seine Höhe im Layout oft falsch -> lange Namen wurden rechts
+// bzw. unten abgeschnitten. Dieses Label zeichnet den Text selbst:
+//  - Umbruch an Wortgrenzen, notfalls mitten im Wort,
+//  - höchstens 2 Zeilen, die zweite wird bei Bedarf mit "…" gekürzt,
+//  - feste Höhe = 2 volle Zeilenhöhen -> keine abgeschnittenen Buchstaben,
+//  - voller Name als Tooltip.
+namespace {
+class LayerNameLabel : public QLabel {
+public:
+    explicit LayerNameLabel(const QString& text, QWidget* parent = nullptr)
+        : QLabel(text, parent)
+    {
+        setWordWrap(false);
+        setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+        setFixedHeight(QFontMetrics(font()).lineSpacing() * 2 + 2);
+        setToolTip(text);
+    }
+    void setNameText(const QString& t) { setText(t); setToolTip(t); update(); }
+
+    QSize sizeHint() const override {
+        return QSize(80, QFontMetrics(font()).lineSpacing() * 2 + 2);
+    }
+    QSize minimumSizeHint() const override {
+        return QSize(20, QFontMetrics(font()).lineSpacing() * 2 + 2);
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        p.setPen(palette().color(QPalette::WindowText));
+        p.setFont(font());
+        const QFontMetrics fm(font());
+        const int w = qMax(1, width());
+
+        // Zeilen bilden (max. 2).
+        QStringList lines;
+        QString rest = text();
+        while (!rest.isEmpty() && lines.size() < 2) {
+            if (lines.size() == 1) {
+                // Letzte Zeile: Rest ggf. mit "…" kürzen.
+                lines << fm.elidedText(rest, Qt::ElideRight, w);
+                break;
+            }
+            if (fm.horizontalAdvance(rest) <= w) { lines << rest; break; }
+            // Längster Anfang, der in die Zeile passt.
+            int fit = 1;
+            for (int n = 1; n <= rest.size(); ++n) {
+                if (fm.horizontalAdvance(rest.left(n)) > w) break;
+                fit = n;
+            }
+            // Möglichst an einem Leerzeichen umbrechen.
+            int brk = rest.left(fit + 1).lastIndexOf(' ');
+            int take = (brk > 0) ? brk : fit;
+            lines << rest.left(take);
+            rest = rest.mid(take).trimmed();
+        }
+
+        const int lh = fm.lineSpacing();
+        const int totalH = lines.size() * lh;
+        int y = (height() - totalH) / 2 + fm.ascent();
+        for (const QString& l : lines) {
+            p.drawText(0, y, l);
+            y += lh;
+        }
+    }
+};
+} // namespace
+
 // ===================================================================
 // LayerRowWidget
 // ===================================================================
@@ -48,7 +145,7 @@ LayerRowWidget::LayerRowWidget(int index, Layer* layer, QWidget* parent)
     m_preview->setFixedSize(40, 40);
     m_preview->setScaledContents(true);
     m_preview->setStyleSheet("border:1px solid #555;");
-    updatePreview(layer->image);
+    updatePreview(layer->image, layer->visible);
     leftCol->addWidget(m_preview);
 
     m_info = new QLabel(this);
@@ -76,11 +173,9 @@ LayerRowWidget::LayerRowWidget(int index, Layer* layer, QWidget* parent)
     nameLay->setContentsMargins(0, 0, 0, 0);
     nameLay->setSpacing(0);
     nameLay->setAlignment(Qt::AlignVCenter);
-    m_name = new QLabel(layer->name, this);
-    m_name->setWordWrap(true);
-    // Maximal 2 Zeilen: Hoehe aus der aktuellen Schrift berechnen
-    QFontMetrics fm(m_name->font());
-    m_name->setMaximumHeight(fm.height() * 2 + fm.leading() + 2);
+    // Name über max. 2 Zeilen, Buchstaben werden nie abgeschnitten
+    // (siehe LayerNameLabel oben).
+    m_name = new LayerNameLabel(layer->name, this);
     m_nameEdit = new QLineEdit(layer->name, this);
     m_nameEdit->setFrame(false);
     m_nameEdit->selectAll();
@@ -91,16 +186,18 @@ LayerRowWidget::LayerRowWidget(int index, Layer* layer, QWidget* parent)
 
     // --- Signal-Verbindungen ------------------------------------------
     connect(m_nameEdit, &QLineEdit::editingFinished, this, [this]() {
+        if (!m_nameEdit->isVisible()) return;   // schon abgeschlossen
         QString txt = m_nameEdit->text().trimmed();
-        if (!txt.isEmpty()) {
-            m_name->setText(txt);
-            emit renameRequested(m_index, txt);
-        }
         m_nameEdit->hide();
         m_name->show();
+        // Tastatur wieder ans Hauptfenster geben (Shortcuts, Leinwand).
+        if (QWidget* mw = window()->parentWidget())
+            mw->window()->activateWindow();
+        if (!txt.isEmpty() && txt != m_name->text()) {
+            static_cast<LayerNameLabel*>(m_name)->setNameText(txt);
+            emit renameRequested(m_index, txt);   // loest rebuild aus
+        }
     });
-    connect(m_nameEdit, &QLineEdit::returnPressed,
-            m_nameEdit, &QLineEdit::editingFinished);
 
     connect(m_vis, &QCheckBox::toggled, this, [this](bool v) {
         emit visibilityChanged(m_index, v);
@@ -108,8 +205,7 @@ LayerRowWidget::LayerRowWidget(int index, Layer* layer, QWidget* parent)
 
 }
 
-void LayerRowWidget::updatePreview(const QImage& img) {
-    if (img.isNull()) { m_preview->setPixmap(QPixmap()); return; }
+void LayerRowWidget::updatePreview(const QImage& img, bool visible) {
     QPixmap pm(40, 40);
     QPainter p(&pm);
     // Schachbrettmuster fuer Transparenz
@@ -118,10 +214,56 @@ void LayerRowWidget::updatePreview(const QImage& img) {
             p.fillRect(x, y, 8, 8,
                        ((x / 8 + y / 8) % 2) ? QColor(60, 60, 60)
                                               : QColor(90, 90, 90));
-    p.drawImage(0, 0, img.scaled(40, 40, Qt::KeepAspectRatio,
-                                  Qt::SmoothTransformation));
+    // Versteckte Ebene: Preview bleibt leer (nur Schachbrett).
+    if (visible && !img.isNull()) {
+        // Auf den bemalten Bereich zoomen: kleine Zeichnungen werden
+        // vergroessert dargestellt, damit man alles gut erkennt.
+        const QRect bounds = layerContentBounds(img);
+        const QImage crop = bounds.isNull() ? img : img.copy(bounds);
+        const QImage scaled = crop.scaled(40, 40, Qt::KeepAspectRatio,
+                                          Qt::SmoothTransformation);
+        p.drawImage((40 - scaled.width()) / 2, (40 - scaled.height()) / 2, scaled);
+    }
     p.end();
     m_preview->setPixmap(pm);
+}
+
+bool LayerRowWidget::isRenaming() const {
+    return m_nameEdit && m_nameEdit->isVisible();
+}
+
+QString LayerRowWidget::renameText() const {
+    return m_nameEdit ? m_nameEdit->text() : QString();
+}
+
+int LayerRowWidget::renameCursor() const {
+    return m_nameEdit ? m_nameEdit->cursorPosition() : 0;
+}
+
+// Das Ebenen-Dock ist ein schwebendes Fenster, das vom Fenstermanager
+// beim Klicken NICHT aktiviert wird (Qt setzt dafuer
+// X11BypassWindowManagerHint). Ohne explizites activateWindow() kaeme
+// die Tastatur-Eingabe nie im Eingabefeld an -> man koennte nicht tippen.
+static void focusLineEditNow(QLineEdit* edit) {
+    QWidget* win = edit->window();
+    win->raise();
+    win->activateWindow();
+    edit->setFocus(Qt::MouseFocusReason);
+    // Aktivierung kann asynchron sein -> Fokus nach dem Event-Loop-Durchlauf
+    // noch einmal sicherstellen.
+    QTimer::singleShot(0, edit, [edit]() {
+        if (!edit->isVisible()) return;
+        edit->window()->activateWindow();
+        edit->setFocus(Qt::MouseFocusReason);
+    });
+}
+
+void LayerRowWidget::resumeRename(const QString& text, int cursorPos) {
+    m_name->hide();
+    m_nameEdit->setText(text);
+    m_nameEdit->show();
+    focusLineEditNow(m_nameEdit);
+    m_nameEdit->setCursorPosition(cursorPos);
 }
 
 void LayerRowWidget::refreshInfo(float opacity, bool locked) {
@@ -155,8 +297,8 @@ void LayerRowWidget::startInlineRename() {
     m_nameEdit->setText(m_name->text());
     m_name->hide();
     m_nameEdit->show();
-    m_nameEdit->setFocus();
-    m_nameEdit->selectAll();
+    focusLineEditNow(m_nameEdit);
+    m_nameEdit->selectAll();   // sofort lostippen ersetzt den alten Namen
 }
 
 void LayerRowWidget::setDropIndicator(DropPos pos) {
@@ -213,8 +355,10 @@ void LayerRowWidget::mousePressEvent(QMouseEvent* e) {
 }
 
 void LayerRowWidget::mouseDoubleClickEvent(QMouseEvent* e) {
+    // Doppelklick = sofort inline umbenennen (Eigenschaften gibt es
+    // weiterhin ueber das Kontextmenue).
     if (e->button() == Qt::LeftButton)
-        emit propertiesRequested(m_index);
+        startInlineRename();
 }
 
 void LayerRowWidget::mouseMoveEvent(QMouseEvent* e) {
@@ -390,6 +534,7 @@ void LayerDock::showContextMenu(int index, const QPoint& globalPos) {
     QMenu menu(this);
 
     QAction* actRename  = menu.addAction("Umbenennen");
+    QAction* actProps   = menu.addAction("Eigenschaften...");
     QAction* actDel     = menu.addAction("Loeschen");
     menu.addSeparator();
     QAction* actUp      = menu.addAction("Nach oben");
@@ -413,6 +558,14 @@ void LayerDock::showContextMenu(int index, const QPoint& globalPos) {
                 break;
             }
         }
+    } else if (chosen == actProps) {
+        // Eigenschaften-Dialog: frueher per Doppelklick, jetzt hier.
+        for (auto* rw : m_rowWidgets) {
+            if (rw->displayIndex() == index) {
+                emit rw->propertiesRequested(index);
+                break;
+            }
+        }
     } else if (chosen == actDel) {
         m_history->push(new RemoveLayerCommand(m_doc, index));
     } else if (chosen == actUp) {
@@ -433,6 +586,21 @@ void LayerDock::showContextMenu(int index, const QPoint& globalPos) {
 void LayerDock::rebuild() {
     // Alle laufenden Drags abbrechen, bevor Widgets zerstoert werden.
     cancelAllDrags();
+
+    // Laufende Inline-Umbenennung merken: der Doppelklick waehlt die
+    // Ebene auch aus (-> rebuild). Die Eingabe darf dabei nicht verloren
+    // gehen, sondern wird auf die neue Zeile uebertragen.
+    int     renameIdx    = -1;
+    QString renameText;
+    int     renameCursor = 0;
+    for (auto* rw : m_rowWidgets) {
+        if (rw->isRenaming()) {
+            renameIdx    = rw->displayIndex();
+            renameText   = rw->renameText();
+            renameCursor = rw->renameCursor();
+            break;
+        }
+    }
 
     // Alle Zeilen-Widgets entfernen
     QLayoutItem* it;
@@ -641,6 +809,16 @@ void LayerDock::rebuild() {
         m_rowWidgets.push_back(row);
         m_listLayout->insertWidget(m_listLayout->count() - 1, row);
     }
+
+    // Umbenennung fortsetzen, falls eine lief.
+    if (renameIdx >= 0) {
+        for (auto* rw : m_rowWidgets) {
+            if (rw->displayIndex() == renameIdx) {
+                rw->resumeRename(renameText, renameCursor);
+                break;
+            }
+        }
+    }
 }
 
 void LayerDock::clearDropIndicators() {
@@ -665,6 +843,6 @@ void LayerDock::refreshThumbnails() {
         const int realIdx = N - 1 - w;
         if (realIdx < 0 || realIdx >= N) continue;
         if (Layer* lay = m_doc->layer(realIdx))
-            m_rowWidgets[w]->updatePreview(lay->image);
+            m_rowWidgets[w]->updatePreview(lay->image, lay->visible);
     }
 }

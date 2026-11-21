@@ -184,7 +184,9 @@ public:
 private:
     Document* m_doc;
     History*  m_history;
-    MoveMode  m_mode = Selection;
+    // Standard: Pixel der aktiven Ebene verschieben (Auswahl treffen,
+    // Verschieber nehmen, ziehen -> Pixel bewegen sich).
+    MoveMode  m_mode = Pixels;
     bool      m_dragging = false;
     QPointF   m_lastPos;
     QPointF   m_pressPos;          // Press-Position für das Gesamt-Delta (Pixel-Modus)

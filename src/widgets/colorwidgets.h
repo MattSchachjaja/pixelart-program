@@ -71,6 +71,7 @@ signals:
 protected:
     void resizeEvent(QResizeEvent*) override;
     void mousePressEvent(QMouseEvent* e) override;
+    void paintEvent(QPaintEvent*) override;
 
 private:
     void updateStyle();
@@ -116,4 +117,11 @@ private:
     ColorPicker*      m_picker;
     QSlider*         m_alphaSlider;
     QLabel*          m_alphaLabel;
+    QSlider*         m_briSlider;
+    QLabel*          m_briLabel;
+    // Helligkeitsregler: gemerkter Farbton/Sättigung (gehen bei V=0 verloren).
+    int              m_briHue = 0;
+    int              m_briSat = 0;
+    bool             m_briBaseValid = false;
+    bool             m_briSelfUpdate = false;
 };

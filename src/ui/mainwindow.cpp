@@ -44,6 +44,10 @@
 #include <QVBoxLayout>
 #include <QFileInfo>
 #include <QStatusBar>
+#include <QDataStream>
+#include <QFile>
+#include <QSettings>
+#include <QCloseEvent>
 #include <cmath>
 
 
@@ -108,6 +112,19 @@ protected:
         geo.setSize(geo.size().expandedTo(m_dock->minimumSize()));
         if (m_dock->maximumSize() != QSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX))
             geo.setSize(geo.size().boundedTo(m_dock->maximumSize()));
+
+        // Innerhalb des Hauptfensters bleiben, OHNE die feste Kante zu
+        // verschieben: Beim Ziehen unten bleibt oben fix (die Hoehe wird
+        // begrenzt, statt das Fenster nach oben zu schieben). Sonst
+        // wuerde constrainDock() beim Move-Event die Oberkante hochschieben
+        // und das Fenster "von oben" skalieren.
+        if (QWidget* mw = m_dock->parentWidget()) {
+            const QRect b = mw->geometry();
+            if (geo.left()   < b.left())   geo.setLeft(b.left());
+            if (geo.right()  > b.right())  geo.setRight(b.right());
+            if (geo.bottom() > b.bottom()) geo.setBottom(b.bottom());
+            if (geo.top()    < b.top())    geo.setTop(b.top());
+        }
 
         m_dock->setGeometry(geo);
     }
@@ -509,6 +526,16 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             m_toolsDock->selectTool(idx);
         });
     }
+
+    // Speichern: Projekt (mit Ebenen + Verlauf) und PNG-Export.
+    auto* saveProjSC = regSC("Projekt speichern", QKeySequence("Ctrl+S"));
+    connect(saveProjSC, &QShortcut::activated, this, &MainWindow::saveProject);
+    auto* savePngSC = regSC("Als PNG speichern", QKeySequence("Ctrl+Shift+S"));
+    connect(savePngSC, &QShortcut::activated, this, &MainWindow::savePng);
+
+    // Gespeicherte Tastenbelegung vom letzten Programmstart laden.
+    loadShortcuts();
+    updateMenuShortcutHints();
 }
 
 // ===================================================================
@@ -651,6 +678,33 @@ void MainWindow::repositionDocksRelative() {
 }
 
 bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
+    // Schwebende Docks: Qt hat einen eigenen, unsichtbaren Resize-Griff
+    // (QWidgetResizeHandler) am 1-Pixel-Rahmen des Docks – auch OBEN.
+    // Darüber ließ sich das Fenster von oben skalieren. Die Werkzeugfenster
+    // sollen aber nur unten/seitlich skalierbar sein (eigene EdgeGrips).
+    // Daher: Maus-Ereignisse direkt auf dem Dock im Bereich oberhalb des
+    // Inhalts (Rahmen + Titelleiste) abfangen, bevor Qt sie sieht.
+    // (Dieser Filter wird nach dem Qt-Griff installiert und läuft daher
+    // zuerst.)
+    if (event->type() == QEvent::MouseButtonPress
+        || event->type() == QEvent::MouseButtonDblClick
+        || event->type() == QEvent::MouseMove
+        || event->type() == QEvent::MouseButtonRelease) {
+        auto* dock = qobject_cast<QDockWidget*>(watched);
+        if (dock && dock->isFloating()) {
+            auto* me = static_cast<QMouseEvent*>(event);
+            int topZone = 4;
+            if (QWidget* tb = dock->titleBarWidget())
+                topZone = tb->geometry().top() + 2;   // Rahmen über der Titelleiste
+            const int y = int(me->position().y());
+            if (y < topZone) {
+                if (event->type() == QEvent::MouseMove && me->buttons() == Qt::NoButton)
+                    dock->unsetCursor();   // kein "Größe ändern"-Cursor oben
+                return true;
+            }
+        }
+    }
+
     // Dock wird bewegt -> im Hauptfenster einschraenken.
     if (event->type() == QEvent::Move) {
         auto* dock = qobject_cast<QDockWidget*>(watched);
@@ -784,7 +838,21 @@ void MainWindow::buildMenu() {
 
     auto* newAct = fileMenu->addAction("&Neu", QKeySequence::New);
     connect(newAct, &QAction::triggered, this, [this]() {
-        ResizeCanvasDialog dlg(DOC_W, DOC_H, this);
+        // Wurde eine Auswahl kopiert, bekommt die neue Datei die Größe
+        // der Kopie als Vorschlag (interne Kopie hat Vorrang vor dem
+        // System-Clipboard).
+        int defW = DOC_W, defH = DOC_H;
+        if (m_hasInternalCopy && !m_internalCopy.isNull()) {
+            defW = m_internalCopy.width();
+            defH = m_internalCopy.height();
+        } else {
+            const QImage clip = QApplication::clipboard()->image();
+            if (!clip.isNull()) {
+                defW = clip.width();
+                defH = clip.height();
+            }
+        }
+        ResizeCanvasDialog dlg(defW, defH, this);
         dlg.setWindowTitle("Neues Bild");
         if (dlg.exec() != QDialog::Accepted) return;
         beginNewDocument(dlg.newW(), dlg.newH());
@@ -793,12 +861,26 @@ void MainWindow::buildMenu() {
     auto* openAct = fileMenu->addAction("Ö&ffnen...", QKeySequence::Open);
     connect(openAct, &QAction::triggered, this, [this]() { openFile(); });
 
-    auto* saveAct = fileMenu->addAction("&Speichern unter...", QKeySequence::Save);
-    connect(saveAct, &QAction::triggered, this, [this]() {
+    fileMenu->addSeparator();
+
+    // Die Tastenkürzel (Strg+S / Strg+Umschalt+S) laufen über die
+    // anpassbaren QShortcuts; im Menü werden sie nur als Hinweis angezeigt
+    // (siehe updateMenuShortcutHints).
+    m_saveProjAct = fileMenu->addAction("Projekt &speichern");
+    connect(m_saveProjAct, &QAction::triggered, this, &MainWindow::saveProject);
+
+    auto* saveProjAsAct = fileMenu->addAction("Projekt speichern &unter...");
+    connect(saveProjAsAct, &QAction::triggered, this, &MainWindow::saveProjectAs);
+
+    m_savePngAct = fileMenu->addAction("Als &PNG speichern");
+    connect(m_savePngAct, &QAction::triggered, this, &MainWindow::savePng);
+
+    auto* exportAct = fileMenu->addAction("Als Bild &exportieren...");
+    connect(exportAct, &QAction::triggered, this, [this]() {
         const QString start = QStandardPaths::writableLocation(
             QStandardPaths::PicturesLocation);
         const QString path = QFileDialog::getSaveFileName(
-            this, "Bild speichern", start + "/unbenannt.png",
+            this, "Bild exportieren", start + "/unbenannt.png",
             "PNG (*.png);;JPEG (*.jpg);;BMP (*.bmp)");
         if (path.isEmpty()) return;
         QImage out = m_doc->composite();
@@ -822,6 +904,25 @@ void MainWindow::buildMenu() {
         m_history->push(new ResizeCanvasCommand(m_doc, dlg.newW(), dlg.newH()));
         m_canvas->resetView();
     });
+
+    // Spiegeln: komplette Leinwand mit allen Ebenen (und der Auswahl).
+    // Ein schwebender Paste-Buffer wird vorher übernommen, damit er
+    // mitgespiegelt wird.
+    imgMenu->addSeparator();
+    auto* flipHAct = imgMenu->addAction(QString::fromUtf8("Horizontal spiegeln (links \xE2\x86\x94 rechts)"));
+    connect(flipHAct, &QAction::triggered, this, [this]() {
+        if (!m_doc) return;
+        if (m_doc->hasPasteBuffer()) commitPaste();
+        m_history->push(new FlipCanvasCommand(m_doc, true, false));
+    });
+
+    auto* flipVAct = imgMenu->addAction(QString::fromUtf8("Vertikal spiegeln (oben \xE2\x86\x95 unten)"));
+    connect(flipVAct, &QAction::triggered, this, [this]() {
+        if (!m_doc) return;
+        if (m_doc->hasPasteBuffer()) commitPaste();
+        m_history->push(new FlipCanvasCommand(m_doc, false, true));
+    });
+    imgMenu->addSeparator();
 
     auto* adjustAct = imgMenu->addAction(QString::fromUtf8("Farbanpassung..."));
     connect(adjustAct, &QAction::triggered, this, &MainWindow::openAdjustments);
@@ -848,8 +949,56 @@ void MainWindow::buildMenu() {
                 if (m_scInfos[i].name == "Auswahl aufheben")
                     m_canvas->setClearSelectionKey(result[i].currentKey);
             }
+            saveShortcuts();
+            updateMenuShortcutHints();
         }
     });
+}
+
+// Zeigt die aktuell eingestellten Tastenkürzel rechts neben den
+// Speichern-Einträgen im Datei-Menü an.
+void MainWindow::updateMenuShortcutHints() {
+    auto keyOf = [this](const QString& name) -> QString {
+        for (const auto& info : m_scInfos)
+            if (info.name == name)
+                return info.currentKey.toString(QKeySequence::NativeText);
+        return QString();
+    };
+    auto apply = [](QAction* act, const QString& text, const QString& key) {
+        if (!act) return;
+        act->setText(key.isEmpty() ? text : text + "\t" + key);
+    };
+    apply(m_saveProjAct, "Projekt &speichern", keyOf("Projekt speichern"));
+    apply(m_savePngAct,  "Als &PNG speichern", keyOf("Als PNG speichern"));
+}
+
+// ===================================================================
+// Shortcuts persistent speichern / laden
+// ===================================================================
+void MainWindow::saveShortcuts() {
+    QSettings s;
+    for (const auto& info : m_scInfos)
+        s.setValue("shortcuts/" + info.name, info.currentKey.toString());
+}
+
+void MainWindow::loadShortcuts() {
+    QSettings s;
+    for (auto& info : m_scInfos) {
+        const QVariant v = s.value("shortcuts/" + info.name);
+        if (!v.isValid()) continue;
+        const QKeySequence ks(v.toString());
+        info.currentKey = ks;
+        info.shortcut->setKey(ks);
+        if (info.name == "Auswahl aufheben")
+            m_canvas->setClearSelectionKey(ks);
+    }
+}
+
+void MainWindow::closeEvent(QCloseEvent* e) {
+    // Beim Schließen die aktuelle Tastenbelegung sichern, damit sie
+    // beim nächsten Start sofort wieder aktiv ist.
+    saveShortcuts();
+    QMainWindow::closeEvent(e);
 }
 
 void MainWindow::toggleFullscreen() {
@@ -1330,7 +1479,7 @@ void MainWindow::buildToolOptions(ITool* tool) {
             magic->setTolerance(v);
             tolValue->setText(QString::number(v));
         });
-        auto* cross = new QCheckBox("Ebenen\xC3\xBCbergreifend", m_toolOptionsHost);
+        auto* cross = new QCheckBox("Ebenenübergreifend", m_toolOptionsHost);
         cross->setChecked(magic->crossLayer());
         connect(cross, &QCheckBox::toggled, this, [magic](bool c) { magic->setCrossLayer(c); });
         m_toolOptionsLayout->addWidget(cross);
@@ -1365,7 +1514,7 @@ void MainWindow::buildToolOptions(ITool* tool) {
             fill->setTolerance(v);
             tolValue->setText(QString::number(v));
         });
-        auto* cross = new QCheckBox("Ebenen\xC3\xBCbergreifend", m_toolOptionsHost);
+        auto* cross = new QCheckBox("Ebenenübergreifend", m_toolOptionsHost);
         cross->setChecked(fill->crossLayer());
         connect(cross, &QCheckBox::toggled, this, [fill](bool c) { fill->setCrossLayer(c); });
         m_toolOptionsLayout->addWidget(cross);
@@ -1526,14 +1675,22 @@ void MainWindow::beginNewDocument(int w, int h) {
     switchToSession(idx);
 }
 
-// "Öffnen" lädt ein Bild als neue Session.
+// "Öffnen" lädt ein Bild oder ein gespeichertes Projekt als neue Session.
 void MainWindow::openFile() {
     const QString start = QStandardPaths::writableLocation(
         QStandardPaths::PicturesLocation);
     const QString path = QFileDialog::getOpenFileName(
-        this, "Bild öffnen", start,
-        "Bilder (*.png *.jpg *.jpeg *.bmp *.webp)");
+        this, "Bild oder Projekt öffnen", start,
+        "Bilder (*.png *.jpg *.jpeg *.bmp *.webp);;"
+        "OtreraPaint-Projekte (*.otrp);;Alle Dateien (*)");
     if (path.isEmpty()) return;
+
+    if (path.endsWith(".otrp", Qt::CaseInsensitive)) {
+        if (!loadProjectFrom(path))
+            QMessageBox::warning(this, "Öffnen",
+                "Projekt konnte nicht geladen werden:\n" + path);
+        return;
+    }
 
     QImage img(path);
     if (img.isNull()) {
@@ -1556,6 +1713,184 @@ void MainWindow::openFile() {
     // kommt hinzu). Danach auf die neue Session schalten.
     updatePreviewThumbnails();
     switchToSession(idx);
+}
+
+// ===================================================================
+// Projekt speichern / laden (.otrp) und PNG-Export
+// ===================================================================
+
+// Strg+S: speichert das komplette Projekt (Ebenen, Auswahl, Verlauf).
+// Ist noch kein Speicherort bekannt, wird einmalig gefragt.
+void MainWindow::saveProject() {
+    if (!m_doc || m_activeSession < 0 || m_activeSession >= m_sessions.size()) return;
+    auto& s = m_sessions[m_activeSession];
+    if (s.projectPath.isEmpty()) {
+        saveProjectAs();
+        return;
+    }
+    if (!saveProjectTo(s.projectPath))
+        QMessageBox::warning(this, "Projekt speichern",
+            "Projekt konnte nicht gespeichert werden:\n" + s.projectPath);
+}
+
+void MainWindow::saveProjectAs() {
+    if (!m_doc || m_activeSession < 0 || m_activeSession >= m_sessions.size()) return;
+    auto& s = m_sessions[m_activeSession];
+    const QString start = QStandardPaths::writableLocation(
+        QStandardPaths::PicturesLocation);
+    const QString suggested = s.projectPath.isEmpty()
+        ? start + "/" + s.name + ".otrp" : s.projectPath;
+    QString path = QFileDialog::getSaveFileName(
+        this, "Projekt speichern", suggested,
+        "OtreraPaint-Projekt (*.otrp)");
+    if (path.isEmpty()) return;
+    if (!path.endsWith(".otrp", Qt::CaseInsensitive)) path += ".otrp";
+
+    if (!saveProjectTo(path)) {
+        QMessageBox::warning(this, "Projekt speichern",
+            "Projekt konnte nicht gespeichert werden:\n" + path);
+        return;
+    }
+    s.projectPath = path;
+    s.name = QFileInfo(path).completeBaseName();
+    setWindowTitle("MiniPaint - " + s.name);
+    if (m_activeSession < m_thumbs.size() && m_thumbs[m_activeSession].name)
+        m_thumbs[m_activeSession].name->setText(s.name);
+}
+
+// Schreibt das komplette Projekt: Document-Zustand + Undo/Redo-Verlauf.
+bool MainWindow::saveProjectTo(const QString& path) {
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly)) return false;
+    QDataStream out(&f);
+    out.setVersion(QDataStream::Qt_6_0);
+
+    // Version 2: Farbslot-Commands enthalten die Paletten-Zeilenstruktur.
+    out << QString("OTRPAINT") << qint32(2);
+    out << qint32(m_doc->width()) << qint32(m_doc->height());
+    out << qint32(m_doc->activeLayerIndex());
+    out << qint32(m_doc->layerCount());
+    for (int i = 0; i < m_doc->layerCount(); ++i) {
+        const Layer* l = m_doc->layer(i);
+        out << l->name << l->visible << l->opacity << l->locked << l->image;
+    }
+    out << m_doc->selectionMask();
+    out << m_doc->hasPasteBuffer();
+    if (m_doc->hasPasteBuffer())
+        out << m_doc->pasteBuffer() << m_doc->pasteOffset();
+
+    out << qint32(m_history->count()) << qint32(m_history->current());
+    for (int i = 0; i < m_history->count(); ++i) {
+        ICommand* cmd = m_history->commandAt(i);
+        out << qint32(cmd->type());
+        cmd->write(out);
+    }
+    f.close();
+    return out.status() == QDataStream::Ok;
+}
+
+// Lädt ein Projekt als neue Session. Der Verlauf wird im gespeicherten
+// Zustand wiederhergestellt (Undo/Redo funktionieren sofort weiter).
+bool MainWindow::loadProjectFrom(const QString& path) {
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return false;
+    QDataStream in(&f);
+    in.setVersion(QDataStream::Qt_6_0);
+
+    QString magic; qint32 version;
+    in >> magic >> version;
+    if (magic != "OTRPAINT" || version < 1 || version > 2) return false;
+
+    qint32 w, h, active, count;
+    in >> w >> h >> active >> count;
+    if (in.status() != QDataStream::Ok || w < 1 || h < 1 ||
+        w > 8192 || h > 8192 || count < 1 || count > 1000)
+        return false;
+
+    DocumentSession s;
+    s.doc = new Document(w, h, this);
+    // Demo-Ebenen des Konstruktors entfernen, dann die gespeicherten
+    // Ebenen in Original-Reihenfolge einsetzen.
+    while (s.doc->layerCount() > 0) s.doc->removeLayer(0);
+    for (int i = 0; i < count; ++i) {
+        QString name; bool vis; float op; bool locked; QImage img;
+        in >> name >> vis >> op >> locked >> img;
+        if (in.status() != QDataStream::Ok) { delete s.doc; return false; }
+        s.doc->insertLayer(i, name, img, vis, op);
+        s.doc->setLayerLocked(i, locked);
+    }
+    s.doc->setActiveLayer(active);
+
+    QImage mask;
+    in >> mask;
+    if (!mask.isNull() && mask.size() == QSize(w, h))
+        s.doc->setSelection(mask);
+
+    bool hasPaste = false;
+    in >> hasPaste;
+    if (hasPaste) {
+        QImage pb; QPoint off;
+        in >> pb >> off;
+        if (!pb.isNull()) s.doc->setPasteBuffer(pb, off);
+    }
+
+    qint32 histCount = 0, histCurrent = 0;
+    in >> histCount >> histCurrent;
+    if (in.status() != QDataStream::Ok || histCount < 0 || histCount > 100000) {
+        delete s.doc;
+        return false;
+    }
+    QList<ICommand*> cmds;
+    for (int i = 0; i < histCount; ++i) {
+        qint32 type;
+        in >> type;
+        ICommand* cmd = loadCommandFromStream(in, type, s.doc, m_colors, version);
+        if (!cmd || in.status() != QDataStream::Ok) {
+            delete cmd;
+            qDeleteAll(cmds);
+            delete s.doc;
+            return false;
+        }
+        cmds.append(cmd);
+    }
+    f.close();
+
+    s.history = new History(this);
+    s.history->loadStack(cmds, histCurrent);
+    s.name = QFileInfo(path).fileName();
+    s.projectPath = path;
+
+    int idx = m_sessions.size();
+    m_sessions.append(s);
+    updatePreviewThumbnails();
+    switchToSession(idx);
+    return true;
+}
+
+// Strg+Shift+S: speichert sofort als PNG. Ein einmal gewählter
+// PNG-Pfad wird wiederverwendet (danach geht es ohne Dialog).
+void MainWindow::savePng() {
+    if (!m_doc || m_activeSession < 0 || m_activeSession >= m_sessions.size()) return;
+    auto& s = m_sessions[m_activeSession];
+    QString path = s.pngPath;
+    if (path.isEmpty()) {
+        const QString start = QStandardPaths::writableLocation(
+            QStandardPaths::PicturesLocation);
+        const QString base = s.projectPath.isEmpty()
+            ? s.name : QFileInfo(s.projectPath).completeBaseName();
+        path = QFileDialog::getSaveFileName(
+            this, "Als PNG speichern", start + "/" + base + ".png",
+            "PNG (*.png)");
+        if (path.isEmpty()) return;
+        if (!path.endsWith(".png", Qt::CaseInsensitive)) path += ".png";
+    }
+    QImage out = m_doc->composite();
+    if (!out.save(path, "PNG")) {
+        QMessageBox::warning(this, "Als PNG speichern",
+            "Bild konnte nicht gespeichert werden:\n" + path);
+        return;
+    }
+    s.pngPath = path;
 }
 
 // Wechselt die aktive Datei. Alle Komponenten (Canvas, Docks, Tools)

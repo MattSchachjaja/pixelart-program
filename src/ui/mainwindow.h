@@ -14,6 +14,7 @@ class QEvent;
 class QAction;
 class QMoveEvent;
 class QResizeEvent;
+class QCloseEvent;
 class QDockWidget;
 class QWidget;
 class QToolBar;
@@ -42,6 +43,8 @@ struct DocumentSession {
     Document* doc = nullptr;
     History*  history = nullptr;
     QString   name;
+    QString   projectPath;   // letzter Speicherort des Projekts (.otrp)
+    QString   pngPath;       // letzter Speicherort des PNG-Exports
     // Signal-Verbindung für Thumbnail-Aktualisierung.
     QMetaObject::Connection changedConn;
 };
@@ -65,6 +68,7 @@ protected:
     void changeEvent(QEvent* e) override;
     void moveEvent(QMoveEvent* e) override;
     void resizeEvent(QResizeEvent* e) override;
+    void closeEvent(QCloseEvent* e) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
@@ -76,6 +80,14 @@ private:
     void toggleFullscreen();
     void beginNewDocument(int w, int h);  // neue leere Datei als eigene Session
     void openFile();                      // Datei öffnen → neue Session
+    void saveProject();                   // Strg+S: Projekt speichern (ggf. Dialog)
+    void saveProjectAs();                 // Projekt speichern unter...
+    bool saveProjectTo(const QString& path);
+    bool loadProjectFrom(const QString& path);
+    void savePng();                       // Strg+Shift+S: als PNG speichern
+    void saveShortcuts();                 // Tastenbelegung persistent sichern
+    void loadShortcuts();                 // Tastenbelegung beim Start laden
+    void updateMenuShortcutHints();       // Kürzel im Datei-Menü anzeigen
     void deleteSelectionPixels();   // Delete / Strg+X: Pixel in Auswahl löschen
     void copySelection();           // Strg+C: Auswahl ins Clipboard
     void pasteClipboard();          // Strg+V: aus Clipboard eininfügen
@@ -112,6 +124,8 @@ private:
     PaletteDock*  m_paletteDock;
     ToolsDock*    m_toolsDock;
     QAction*      m_fullscreenAct = nullptr;
+    QAction*      m_saveProjAct = nullptr;
+    QAction*      m_savePngAct  = nullptr;
     QList<ShortcutEntry> m_scInfos;
 
     // --- Farbanpassung (modusloser Dialog mit Live-Vorschau) ---

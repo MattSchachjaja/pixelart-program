@@ -63,11 +63,12 @@ void Document::insertLayer(int index, const QString& name,
                            const QImage& img, bool vis, float op)
 {
     auto* l = new Layer(m_width, m_height, name);
-    l->image = img;
+    if (!img.isNull()) l->image = img;
     l->visible = vis;
     l->opacity = op;
-    m_layers.insert(qBound(0, index, m_layers.size()), l);
-    m_activeLayer = index;
+    const int at = qBound(0, index, m_layers.size());
+    m_layers.insert(at, l);
+    m_activeLayer = at;
     emit changed();
     emit structureChanged();
 }
@@ -169,6 +170,17 @@ void Document::resize(int newW, int newH) {
     m_height = newH;
     emit changed();
     emit structureChanged();
+}
+
+void Document::flip(bool horizontal, bool vertical) {
+    for (Layer* l : m_layers)
+        l->image = l->image.mirrored(horizontal, vertical);
+    if (m_hasSelection && !m_selectionMask.isNull()) {
+        m_selectionMask = m_selectionMask.mirrored(horizontal, vertical);
+        rebuildSelectionCache();
+        emit selectionChanged();
+    }
+    emit changed();
 }
 
 void Document::loadFromImage(const QImage& img) {

@@ -284,6 +284,22 @@ void ColorSwatch::mousePressEvent(QMouseEvent* e) {
     QFrame::mousePressEvent(e);
 }
 
+// Kleine Markierung unten rechts, wenn die Farbe nicht voll deckend ist
+// (Transparenz unter 100%). Weisser Punkt mit dunklem Rand – auf jeder
+// Farbe sichtbar.
+void ColorSwatch::paintEvent(QPaintEvent* e) {
+    QFrame::paintEvent(e);
+    if (m_color.isValid() && m_color.alpha() < 255) {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        const qreal r = qMax(2.0, width() / 9.0);
+        const QPointF c(width() - r - 2.0, height() - r - 2.0);
+        p.setPen(QPen(QColor(0, 0, 0, 180), 1));
+        p.setBrush(QColor(255, 255, 255, 235));
+        p.drawEllipse(c, r, r);
+    }
+}
+
 // ===================================================================
 // PaletteSwatch — skalierbares Palette-Feld
 // ===================================================================
@@ -359,11 +375,81 @@ ColorDock::ColorDock(ColorState* state, QWidget* parent)
     alphaRow->addWidget(m_alphaLabel);
     outer->addLayout(alphaRow);
 
+    // Ein Regler-Zug = EIN Verlaufsschritt (sonst entstünde pro
+    // Zwischenwert ein eigener Eintrag im Verlauf).
+    connect(m_alphaSlider, &QSlider::sliderPressed, this, [this]() {
+        m_state->beginColorChange();
+    });
+    connect(m_alphaSlider, &QSlider::sliderReleased, this, [this]() {
+        m_state->endColorChange();
+    });
     connect(m_alphaSlider, &QSlider::valueChanged, this, [this](int val) {
         QColor c = m_state->activeColor();
+        if (!c.isValid()) return;
         c.setAlpha(val);
         m_state->setActiveColor(c);
         m_alphaLabel->setText(QString::number(val * 100 / 255) + "%");
+    });
+
+    // --- Helligkeits-Slider (HSV-Value der aktiven Farbe) ---
+    auto* briRow = new QHBoxLayout();
+    briRow->setContentsMargins(0, 0, 0, 0);
+
+    auto* briTitle = new QLabel("Helligkeit:", this);
+    briTitle->setStyleSheet("color:#aaa;");
+    briRow->addWidget(briTitle);
+
+    m_briSlider = new QSlider(Qt::Horizontal, this);
+    m_briSlider->setRange(0, 255);
+    m_briSlider->setValue(255);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
+    m_briSlider->setClickOutsideSlider(true);
+#endif
+#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
+    m_briSlider->setClickOnAccess(QSlider::ClickOnAccess::SliderGroove);
+#endif
+    m_briSlider->setStyleSheet(
+        "QSlider::groove:horizontal{ background:#444; height:6px; border-radius:3px; }"
+        "QSlider::handle:horizontal{ background:#3a7bd5; width:14px; margin:-5px 0; border-radius:7px; }"
+        "QSlider::sub-page:horizontal{ background:#3a7bd5; border-radius:3px; }");
+    briRow->addWidget(m_briSlider, 1);
+
+    m_briLabel = new QLabel("100%", this);
+    m_briLabel->setStyleSheet("color:#aaa; min-width:32px;");
+    m_briLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    briRow->addWidget(m_briLabel);
+    outer->addLayout(briRow);
+
+    // Ein Regler-Drag = ein Verlaufsschritt (wie beim ColorPicker).
+    // Farbton und Sättigung werden beim Start gemerkt: Bei Helligkeit 0
+    // (Schwarz) gehen sie in QColor verloren – ohne Merken würde die Farbe
+    // beim Wieder-Aufhellen grau statt wieder farbig.
+    auto rememberHueSat = [this]() {
+        const QColor c = m_state->activeColor();
+        if (!c.isValid()) return;
+        // Schwarz aus eigenem Regler-Zug: gemerkte Werte behalten.
+        if (m_briBaseValid && c.value() == 0) return;
+        m_briHue = qMax(0, c.hsvHue());   // Grau/Schwarz hat Hue -1
+        m_briSat = c.hsvSaturation();
+        m_briBaseValid = true;
+    };
+    connect(m_briSlider, &QSlider::sliderPressed, this, [this, rememberHueSat]() {
+        rememberHueSat();
+        m_state->beginColorChange();
+    });
+    connect(m_briSlider, &QSlider::sliderReleased, this, [this]() {
+        m_state->endColorChange();
+    });
+    connect(m_briSlider, &QSlider::valueChanged, this, [this, rememberHueSat](int val) {
+        QColor c = m_state->activeColor();
+        if (!c.isValid()) return;
+        if (!m_briBaseValid) rememberHueSat();
+        const int a = c.alpha();
+        c.setHsv(qMax(0, m_briHue), m_briSat, val, a);
+        m_briSelfUpdate = true;
+        m_state->setActiveColor(c);
+        m_briSelfUpdate = false;
+        m_briLabel->setText(QString::number(val * 100 / 255) + "%");
     });
 
     // --- ColorPicker (skalierbar) ---
@@ -401,20 +487,32 @@ ColorDock::ColorDock(ColorState* state, QWidget* parent)
     // Früher wurde hier ein Aspect-Ratio erzwungen; das hat aber mit dem
     // Einklapp-Mechanismus kollidiert (das Dock hat beim Ausklappen die
     // gespeicherte Höhe überschrieben). Daher nur noch min-Größe.
-    setMinimumSize(220, 400);
+    setMinimumSize(220, 430);
     setMaximumWidth(440);
 
-    // --- ColorState-Signal -> Alpha-Slider aktuell halten ---
+    // --- ColorState-Signal -> Alpha- und Helligkeits-Slider aktuell halten ---
     // (Slots und Palette werden im PaletteDock gepflegt.)
     connect(m_state, &ColorState::activeColorChanged, this, [this](const QColor&) {
-        int alpha = m_state->activeColor().alpha();
+        const QColor c = m_state->activeColor();
+        if (!c.isValid()) return;
+        int alpha = c.alpha();
         m_alphaSlider->blockSignals(true);
         m_alphaSlider->setValue(alpha);
         m_alphaSlider->blockSignals(false);
         m_alphaLabel->setText(QString::number(alpha * 100 / 255) + "%");
+
+        // Farbe kam von außen (Picker, Palette, Pipette, Undo):
+        // Farbton/Sättigung für den Helligkeitsregler neu merken.
+        if (!m_briSelfUpdate) m_briBaseValid = false;
+
+        int bri = c.value();
+        m_briSlider->blockSignals(true);
+        m_briSlider->setValue(bri);
+        m_briSlider->blockSignals(false);
+        m_briLabel->setText(QString::number(bri * 100 / 255) + "%");
     });
 }
 
 QSize ColorDock::sizeHint() const {
-    return QSize(260, 440);
+    return QSize(260, 470);
 }

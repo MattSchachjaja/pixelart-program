@@ -29,6 +29,12 @@
 // Skaliert eine Alpha8-Maske mit SmoothTransformation. Qt kann Alpha8
 // nicht direkt smooth-skalieren, daher der Umweg ueber ARGB32.
 static QImage scaleAlphaMaskSmooth(const QImage& src, const QSize& dstSize) {
+    if (dstSize.isEmpty()) return QImage();
+    if (src.isNull() || src.size().isEmpty()) {
+        QImage empty(dstSize, QImage::Format_Alpha8);
+        empty.fill(0);
+        return empty;
+    }
     if (src.size() == dstSize) return src.copy();
     QImage argb(src.size(), QImage::Format_ARGB32_Premultiplied);
     argb.fill(Qt::transparent);
@@ -552,22 +558,32 @@ void RectSelectTool::mouseMove(const QPointF& docPos, Qt::KeyboardModifiers) {
     }
 }
 
-void RectSelectTool::mouseRelease(const QPointF&, Qt::MouseButton button) {
+void RectSelectTool::mouseRelease(const QPointF& docPos, Qt::MouseButton button) {
     // Sowohl Links- als auch Rechtsklick beenden den Ziehvorgang
     // (Rechtsklick = Subtraktion, in mousePress als m_subMode markiert).
     if (button != Qt::LeftButton && button != Qt::RightButton) return;
     if (!m_dragging) return;
     m_dragging = false;
 
+    // Pixelgenau: die Loslass-Position ist der verbindliche Endpunkt
+    // (nicht die letzte Move-Position, die minimal abweichen kann).
+    const QPointF snapped(std::floor(docPos.x()), std::floor(docPos.y()));
     if (m_mode == Lasso) {
+        if (snapped != m_lastPoint) m_points.push_back(snapped);
         finishLasso();
         return;
     }
+    m_end = snapped;
 
     // Rechteck / Ellipse: pixelgenaue Maske im normalize+geschnittenen Rechteck.
     const int x1 = int(m_start.x()), y1 = int(m_start.y());
     const int x2 = int(m_end.x()),   y2 = int(m_end.y());
-    QRect r = QRect(QPoint(x1, y1), QPoint(x2, y2)).normalized()
+    // ACHTUNG: NICHT QRect(p1, p2).normalized() verwenden! Bei einem nach
+    // links/oben aufgezogenen Rechteck liefert Qt dort x2+1..x1-1, d.h. die
+    // Auswahl wäre auf jeder Seite um 1 Pixel zu klein. Daher min/max
+    // explizit: Start- UND Endpixel gehören immer zur Auswahl.
+    QRect r = QRect(QPoint(qMin(x1, x2), qMin(y1, y2)),
+                    QPoint(qMax(x1, x2), qMax(y1, y2)))
                   .intersected(QRect(0, 0, m_doc->width(), m_doc->height()));
 
     if (r.isEmpty()) {
@@ -658,9 +674,23 @@ void RectSelectTool::paintOverlay(QPainter& painter) const {
         // an die Unterkante des Endpixels reichen (+1), sonst ist die
         // Vorschau um genau ein Pixel zu klein und deckt sich nicht mit
         // der tatsächlich ausgewählten Fläche.
-        const QRectF vis(m_start, m_end + QPointF(1, 1));
-        if (m_mode == Ellipse) drawOutlinedEllipse(vis.normalized());
-        else                   drawOutlinedRect(vis.normalized());
+        // WICHTIG: erst min/max bestimmen, dann +1 an der rechten/unteren
+        // Kante. (Früher: QRectF(start, end+1).normalized() – beim Ziehen
+        // nach links/oben war die Vorschau dadurch um 1 Pixel verschoben.)
+        const qreal left   = qMin(m_start.x(), m_end.x());
+        const qreal top    = qMin(m_start.y(), m_end.y());
+        const qreal right  = qMax(m_start.x(), m_end.x()) + 1.0;
+        const qreal bottom = qMax(m_start.y(), m_end.y()) + 1.0;
+        const QRectF vis(QPointF(left, top), QPointF(right, bottom));
+        if (m_mode == Ellipse) {
+            drawOutlinedEllipse(vis);
+        } else {
+            // Rechteck ohne Antialiasing -> exakt auf den Pixelkanten.
+            painter.save();
+            painter.setRenderHint(QPainter::Antialiasing, false);
+            drawOutlinedRect(vis);
+            painter.restore();
+        }
     }
 }
 
@@ -741,8 +771,9 @@ bool FillTool::mousePress(const QPointF& docPos, Qt::MouseButton button, Qt::Key
         for (int x = 0; x < w; ++x) {
             if (mrow[x] == 0) continue;
             if (srow && srow[x] == 0) continue;
-            if (erase && eraseStrength < 1.0f) {
-                // Partielles Löschen: Pixel alpha-mäßig reduzieren.
+            if (erase) {
+                // Rechtsklick = löschen: Pixel alpha-mäßig reduzieren.
+                // keep=0 (volle Löschstärke) macht den Pixel transparent.
                 const QRgb cur = irow[x];
                 const int newA = qRound(qAlpha(cur) * keep);
                 const int newR = qRound(qRed(cur)   * keep);
@@ -1021,12 +1052,16 @@ void MoverTool::beginResize(const QPointF& docPos, DragKind kind) {
         default: break;
     }
 
+    // Auswahlmaske in JEDEM Modus sichern – auch im Selection-Modus,
+    // sonst ist sie beim Skalieren null (Absturz).
+    m_resizeOrigMask = m_doc->hasSelection()
+        ? m_doc->selectionMask().copy() : QImage();
+
     if (m_mode == Pixels) {
         Layer* lay = m_doc->activeLayer();
         if (!lay) { m_dragKind = DragKind::None; m_dragging = false; return; }
         if (lay->locked) { m_dragKind = DragKind::None; m_dragging = false; return; }
         m_resizeBeforeImage = lay->image.copy();
-        m_resizeOrigMask    = m_doc->selectionMask().copy();
         // Auswahl-Pixel auf full-doc Bild kopieren (maskiert).
         const int w = m_doc->width(), h = m_doc->height();
         m_resizeOrigPixels = QImage(w, h, QImage::Format_ARGB32_Premultiplied);

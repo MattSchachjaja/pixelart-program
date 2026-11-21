@@ -18,9 +18,13 @@ public:
     void redo();
     void jumpTo(int target);
 
+    // Projekt laden: bereits ausgefuehrte Commands uebernehmen (ohne execute).
+    void loadStack(QList<ICommand*> cmds, int current);
+
     int     count()   const { return m_stack.size(); }
     int     current() const { return m_current; }
     QString nameAt(int i) const;
+    ICommand* commandAt(int i) const { return m_stack.value(i); }
 
 signals:
     void changed();

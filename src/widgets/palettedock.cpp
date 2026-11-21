@@ -145,45 +145,42 @@ PaletteDock::PaletteDock(ColorState* state, QWidget* parent)
     // aktiver Slot geändert (Shortcuts 1..8 oder Klick): Hervorhebungen
     // anpassen UND die aktive Zeile nachführen (für die Shortcut-Logik).
     connect(m_state, &ColorState::activeSlotChanged, this, [this](int) {
-        int a = m_state->activeSlot();
-        // m_activeRow aus dem flachen Index ableiten.
-        if (a < 0) {
-            m_activeRow = 0;
-        } else {
-            int row = 0;
-            int remaining = a;
-            while (row < m_rowSizes.size() && remaining >= m_rowSizes[row]) {
-                remaining -= m_rowSizes[row];
-                row++;
-            }
-            if (row < m_rowSizes.size())
-                m_activeRow = row;
-        }
-        // Hervorhebungen updaten.
+        updateActiveRow();
+        const int a = m_state->activeSlot();
         for (int i = 0; i < m_swatches.size(); ++i)
             if (m_swatches[i]) m_swatches[i]->setActive(i == a);
     });
-    // Strukturelle Änderung der Slots. Eigene Änderungen (aus
-    // addSlotAtEndOfRow / removeSlotAt) sind über m_internalChange
-    // markiert und übernehmen das Update selbst.
-    // WICHTIG: setColor im ColorPicker feuert ebenfalls slotsChanged.
-    // Dann hat sich aber nur eine Farbe geändert, nicht die Anzahl der
-    // Slots. In diesem Fall dürfen wir m_rowSizes NICHT neu berechnen,
-    // sonst wird die manuelle Zeilen-Struktur überschrieben und die
-    // Slots verteilen sich neu. Wir vergleichen deshalb die Summe
-    // der Zeilengrößen mit slotCount() und reagieren nur bei
-    // Inkonsistenz (Load/Leeren) mit recomputeRowSizesDefault().
-    connect(m_state, &ColorState::slotsChanged, this, [this]() {
-        if (m_internalChange) return;
-        int total = 0;
-        for (int s : m_rowSizes) total += s;
-        if (total != m_state->slotCount()) {
-            recomputeRowSizesDefault();
-            rebuildRows();
-        }
-        // sonst: nur Farbe geändert -> activeColorChanged-Callback
-        // hat den ColorSwatch bereits upgedatet.
+    // Farbänderung eines beliebigen Slots (auch Undo/Redo nicht-aktiver
+    // Slots): betroffenen Swatch direkt aktualisieren – keine Umsortierung.
+    connect(m_state, &ColorState::slotColorChanged, this,
+            [this](int index, const QColor& c) {
+        if (index >= 0 && index < m_swatches.size() && m_swatches[index])
+            m_swatches[index]->setColor(c);
     });
+
+    // Einfügen/Entfernen/Zeilenänderung (auch durch Undo/Redo): Die
+    // Zeilenstruktur kommt exakt aus dem ColorState (der Verlaufsschritt
+    // hat sie gespeichert) -> Slots landen wieder an ihrem alten Platz.
+    // Verzögert (0 ms), da das auslösende Widget evtl. noch im Event steckt.
+    auto scheduleRebuild = [this]() {
+        if (m_internalChange) return;
+        QTimer::singleShot(0, this, [this]() { rebuildRows(); });
+    };
+    connect(m_state, &ColorState::slotInserted,    this, scheduleRebuild);
+    connect(m_state, &ColorState::slotRemoved,     this, scheduleRebuild);
+    connect(m_state, &ColorState::rowSizesChanged, this, scheduleRebuild);
+}
+
+void PaletteDock::updateActiveRow() {
+    const int a = m_state->activeSlot();
+    if (a < 0) { m_activeRow = 0; return; }
+    const QVector<int> rows = m_state->rowSizes();
+    int row = 0, remaining = a;
+    while (row < rows.size() && remaining >= rows[row]) {
+        remaining -= rows[row];
+        ++row;
+    }
+    if (row < rows.size()) m_activeRow = row;
 }
 
 QSize PaletteDock::sizeHint() const {
@@ -191,27 +188,24 @@ QSize PaletteDock::sizeHint() const {
 }
 
 int PaletteDock::slotAt(int row, int col) const {
-    if (row < 0 || row >= m_rowSizes.size()) return -1;
-    if (col < 0 || col >= m_rowSizes[row]) return -1;
+    const QVector<int> rows = m_state->rowSizes();
+    if (row < 0 || row >= rows.size()) return -1;
+    if (col < 0 || col >= rows[row]) return -1;
     int index = 0;
-    for (int i = 0; i < row; ++i) index += m_rowSizes[i];
+    for (int i = 0; i < row; ++i) index += rows[i];
     return index + col;
 }
 
 // m_rowSizes aus der flachen Liste neu aufbauen (Default: m_columns
 // Slots pro Zeile, plus eine leere Zeile am Schluss).
 void PaletteDock::recomputeRowSizesDefault() {
-    m_rowSizes.clear();
-    int total = m_state->slotCount();
-    while (total >= m_columns) {
-        m_rowSizes.append(m_columns);
-        total -= m_columns;
-    }
-    if (total > 0)
-        m_rowSizes.append(total);
     // Immer eine leere Zeile am Schluss, damit der Nutzer jederzeit
-    // eine neue Zeile anfangen kann.
-    m_rowSizes.append(0);
+    // eine neue Zeile anfangen kann (macht ColorState::resetRowSizes).
+    const bool prev = m_internalChange;
+    m_internalChange = true;
+    m_state->resetRowSizes();
+    m_internalChange = prev;
+    m_rowSizes = m_state->rowSizes();
 }
 
 // Einfüge-Index = Summe der Slots aller Zeilen 0..rowIndex.
@@ -232,6 +226,7 @@ int PaletteDock::computeRemoveIndex(int rowIndex, int posInRow) const {
 }
 
 void PaletteDock::addSlotAtEndOfRow(int rowIndex) {
+    m_rowSizes = m_state->rowSizes();
     if (rowIndex < 0 || rowIndex >= m_rowSizes.size()) return;
 
     const int insertIndex = computeInsertIndex(rowIndex);
@@ -243,44 +238,38 @@ void PaletteDock::addSlotAtEndOfRow(int rowIndex) {
     QColor c = m_state->activeColor();
     if (!c.isValid()) c = Qt::white;
 
-    // Eigenes Update: slotsChanged-Callback abschalten, damit dieser
-    // nicht m_rowSizes überschreibt (Absturzursache früher).
-    m_internalChange = true;
-    m_state->insertSlot(insertIndex, c);
+    // Neue Zeilenstruktur: nur diese Zeile bekommt einen Slot dazu.
+    // War die Schluss-Zeile vorher leer, kommt darunter eine neue leere
+    // Zeile hinzu.
+    QVector<int> rowsAfter = m_rowSizes;
+    rowsAfter[rowIndex]++;
+    if (wasLastRow && wasEmpty) rowsAfter.append(0);
 
-    // m_rowSizes nachführen – nur diese Zeile bekommt einen Slot dazu,
-    // alle anderen Zeilen bleiben unangetastet.
-    m_rowSizes[rowIndex]++;
-    // War die Schluss-Zeile vorher leer, bekommt sie jetzt ihren ersten
-    // Slot -> darunter eine neue leere Zeile anhängen.
-    if (wasLastRow && wasEmpty)
-        m_rowSizes.append(0);
-
-    rebuildRows();
-    m_internalChange = false;
+    // Die Zeilenstruktur wird im Verlaufsschritt mitgespeichert.
+    m_state->insertSlot(insertIndex, c, rowsAfter);
 }
 
 void PaletteDock::removeSlotAt(int rowIndex, int posInRow) {
+    m_rowSizes = m_state->rowSizes();
     if (rowIndex < 0 || rowIndex >= m_rowSizes.size()) return;
     if (posInRow < 0 || posInRow >= m_rowSizes[rowIndex]) return;
 
     const int removeIndex = computeRemoveIndex(rowIndex, posInRow);
     const bool isLastRow  = (rowIndex == m_rowSizes.size() - 1);
 
-    m_internalChange = true;
-    m_state->removeSlot(removeIndex);
-
-    m_rowSizes[rowIndex]--;
+    QVector<int> rowsAfter = m_rowSizes;
+    rowsAfter[rowIndex]--;
     // Eine jetzt leere Zeile in der Mitte wird ganz entfernt
     // (nur die letzte Schluss-Zeile darf leer bleiben).
-    if (m_rowSizes[rowIndex] == 0 && !isLastRow)
-        m_rowSizes.removeAt(rowIndex);
+    if (rowsAfter[rowIndex] == 0 && !isLastRow)
+        rowsAfter.removeAt(rowIndex);
 
-    rebuildRows();
-    m_internalChange = false;
+    m_state->removeSlot(removeIndex, rowsAfter);
 }
 
 void PaletteDock::rebuildRows() {
+    m_rowSizes = m_state->rowSizes();
+    updateActiveRow();
     // Alte Zeilen entfernen.
     QLayoutItem* it;
     while ((it = m_rowsLayout->takeAt(0)) != nullptr) {
@@ -392,12 +381,15 @@ bool PaletteDock::loadFromFile(const QString& path) {
     }
     if (loaded.isEmpty()) return false;
 
-    // Massenänderung: History-Aufzeichnung temporär aus.
+    // Massenänderung: History-Aufzeichnung temporär aus; die Zeilen
+    // werden am Ende einmalig neu aufgebaut (nicht pro Slot).
     m_state->setRecordHistory(false);
+    m_internalChange = true;
     while (m_state->slotCount() > 0)
         m_state->removeSlot(m_state->slotCount() - 1);
     for (const QColor& c : loaded)
         m_state->addSlot(c);
+    m_internalChange = false;
     m_state->setRecordHistory(true);
 
     if (m_state->activeSlot() >= m_state->slotCount())
