@@ -3,6 +3,7 @@
 #include "colorstate.h"
 #include "history.h"
 #include "commands.h"
+#include "mirror.h"
 
 #include <QPainter>
 #include <QPen>
@@ -163,7 +164,26 @@ PencilTool::PencilTool(Document* doc, ColorState* cs, History* hist)
 
 // Setzt einen einzelnen Pixel (premultiplied), respektiert Auswahl und –
 // im Pixel-Perfekt-Modus – die Besuchs-Maske (keine Doppelpixel).
+// Gespiegelte Pixelpositionen (ohne Duplikate, ohne das Original).
+static QVector<QPoint> mirroredPixels(const Document* doc, int x, int y) {
+    QVector<QPoint> out;
+    auto& m = MirrorSettings::instance();
+    if (!m.any()) return out;
+    const int ax2 = qRound(m.axisX(doc->width())  * 2.0);
+    const int ay2 = qRound(m.axisY(doc->height()) * 2.0);
+    for (const auto& v : m.variants()) {
+        const QPoint p(v.first ? ax2 - 1 - x : x, v.second ? ay2 - 1 - y : y);
+        if (p != QPoint(x, y) && !out.contains(p)) out.append(p);
+    }
+    return out;
+}
+
 void PencilTool::plot(int x, int y) {
+    plotOne(x, y);
+    for (const QPoint& p : mirroredPixels(m_doc, x, y)) plotOne(p.x(), p.y());
+}
+
+void PencilTool::plotOne(int x, int y) {
     const int w = m_doc->width(), h = m_doc->height();
     if (x < 0 || x >= w || y < 0 || y >= h) return;
     if (m_hasSel) {
@@ -200,6 +220,11 @@ void PencilTool::plot(int x, int y) {
 
 // Holt einen Pixel aus dem Vor-Strich-Zustand zurück (zum Entfernen einer Ecke).
 void PencilTool::restore(int x, int y) {
+    restoreOne(x, y);
+    for (const QPoint& p : mirroredPixels(m_doc, x, y)) restoreOne(p.x(), p.y());
+}
+
+void PencilTool::restoreOne(int x, int y) {
     const int w = m_doc->width(), h = m_doc->height();
     if (x < 0 || x >= w || y < 0 || y >= h) return;
     QImage& img = m_lay->image;
@@ -382,6 +407,20 @@ void BrushTool::paintDot(const QPointF& p, bool erase) {
 //   maskPixel   = max(bisheriger Wert, dabA)    <- keine Stapelung!
 //   sichtbar    = Originalpixel + Pinselfarbe @ maskPixel
 void BrushTool::stampDab(const QPointF& p, bool erase) {
+    stampDabOne(p, erase);
+    auto& m = MirrorSettings::instance();
+    if (!m.any()) return;
+    const double ax2 = m.axisX(m_doc->width())  * 2.0;
+    const double ay2 = m.axisY(m_doc->height()) * 2.0;
+    QVector<QPointF> done{p};
+    for (const auto& v : m.variants()) {
+        const QPointF q(v.first ? ax2 - 1.0 - p.x() : p.x(),
+                        v.second ? ay2 - 1.0 - p.y() : p.y());
+        if (!done.contains(q)) { done.append(q); stampDabOne(q, erase); }
+    }
+}
+
+void BrushTool::stampDabOne(const QPointF& p, bool erase) {
     Layer* lay = m_doc->activeLayer();
     if (!lay || m_strokeMask.isNull()) return;
 
@@ -1291,6 +1330,16 @@ void FormTool::mouseRelease(const QPointF&, Qt::MouseButton button) {
         case Line:      actionName = QString("Linie-%1").arg(shapeWord); break;
     }
 
+    drawShapeMirrored(painter, rect);
+    painter.end();
+    emit m_doc->changed();
+    QRect full(0, 0, m_doc->width(), m_doc->height());
+    m_history->push(new StrokeCommand(m_doc, m_doc->activeLayerIndex(),
+                                       full, before, lay->image.copy(full),
+                                       actionName));
+}
+
+void FormTool::drawShape(QPainter& painter, const QRectF& rect) const {
     switch (m_mode) {
         case Rectangle: painter.drawRect(rect); break;
         case Ellipse:   painter.drawEllipse(rect); break;
@@ -1306,12 +1355,22 @@ void FormTool::mouseRelease(const QPointF&, Qt::MouseButton button) {
         case Line:      painter.drawLine(m_start + QPointF(0.5, 0.5),
                                          m_end   + QPointF(0.5, 0.5)); break;
     }
-    painter.end();
-    emit m_doc->changed();
-    QRect full(0, 0, m_doc->width(), m_doc->height());
-    m_history->push(new StrokeCommand(m_doc, m_doc->activeLayerIndex(),
-                                       full, before, lay->image.copy(full),
-                                       actionName));
+}
+
+// Zeichnet die Form und – bei aktiver Spiegelung – ihre gespiegelten Kopien.
+void FormTool::drawShapeMirrored(QPainter& painter, const QRectF& rect) const {
+    drawShape(painter, rect);
+    auto& m = MirrorSettings::instance();
+    if (!m.any()) return;
+    const double ax2 = m.axisX(m_doc->width())  * 2.0;
+    const double ay2 = m.axisY(m_doc->height()) * 2.0;
+    for (const auto& v : m.variants()) {
+        painter.save();
+        painter.translate(v.first ? ax2 : 0.0, v.second ? ay2 : 0.0);
+        painter.scale(v.first ? -1.0 : 1.0, v.second ? -1.0 : 1.0);
+        drawShape(painter, rect);
+        painter.restore();
+    }
 }
 
 void FormTool::paintOverlay(QPainter& painter) const {
@@ -1341,20 +1400,7 @@ void FormTool::paintOverlay(QPainter& painter) const {
         }
     }
 
-    switch (m_mode) {
-        case Rectangle: painter.drawRect(rect); break;
-        case Ellipse:   painter.drawEllipse(rect); break;
-        case Triangle: {
-            QPolygonF tri;
-            tri << QPointF(rect.left() + rect.width() / 2, rect.top())
-                << QPointF(rect.left(), rect.bottom())
-                << QPointF(rect.right(), rect.bottom());
-            painter.drawPolygon(tri);
-            break;
-        }
-        case Line: painter.drawLine(m_start + QPointF(0.5, 0.5),
-                                    m_end   + QPointF(0.5, 0.5)); break;
-    }
+    drawShapeMirrored(painter, rect);
 }
 
 // =========================================================================

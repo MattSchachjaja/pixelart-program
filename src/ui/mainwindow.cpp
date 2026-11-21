@@ -13,6 +13,7 @@
 #include "colorwidgets.h"
 #include "palettedock.h"
 #include "toolsdock.h"
+#include "mirror.h"
 
 #include <QMenuBar>
 #include <QMenu>
@@ -44,6 +45,8 @@
 #include <QVBoxLayout>
 #include <QFileInfo>
 #include <QStatusBar>
+#include <QIcon>
+#include <QPixmap>
 #include <QDataStream>
 #include <QFile>
 #include <QSettings>
@@ -1456,6 +1459,42 @@ void MainWindow::buildStatusBar() {
     m_statusPos->setMinimumWidth(130);
     m_statusPos->setToolTip("Mausposition auf der Leinwand");
     sb->addWidget(m_statusPos);
+
+    // Spiegel-Schalter (nur Symbole): horizontal = links/rechts, vertikal = oben/unten.
+    auto makeMirrorIcon = [](bool horizontal, const QColor& col) {
+        QPixmap pm(32, 32);
+        pm.fill(Qt::transparent);
+        QPainter p(&pm);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        if (!horizontal) { p.translate(32, 0); p.rotate(90); }   // 90° gedreht
+        QPen dash(col, 2);
+        dash.setDashPattern(QVector<qreal>{2, 2});
+        p.setPen(dash);
+        p.drawLine(QPointF(16, 2), QPointF(16, 30));
+        p.setPen(Qt::NoPen);
+        p.setBrush(col);
+        p.drawPolygon(QPolygonF() << QPointF(12, 10) << QPointF(12, 22) << QPointF(2, 16));
+        p.drawPolygon(QPolygonF() << QPointF(20, 10) << QPointF(20, 22) << QPointF(30, 16));
+        return QIcon(pm);
+    };
+    auto makeMirrorBtn = [&](bool horizontal, const QString& tip) {
+        auto* b = new QToolButton(this);
+        b->setIcon(makeMirrorIcon(horizontal, QColor(220, 220, 220)));
+        b->setIconSize(QSize(16, 16));
+        b->setToolTip(tip);
+        b->setCheckable(true);
+        b->setAutoRaise(true);
+        b->setStyleSheet(
+            "QToolButton{ border:1px solid transparent; border-radius:3px; padding:1px 4px; }"
+            "QToolButton:hover{ background:#3a3a3a; }"
+            "QToolButton:checked{ background:#d5407f; }");
+        sb->addWidget(b);
+        return b;
+    };
+    auto* mh = makeMirrorBtn(true,  "Live-Spiegelung links/rechts (Achse am oberen Rand verschiebbar)");
+    auto* mv = makeMirrorBtn(false, "Live-Spiegelung oben/unten (Achse am linken Rand verschiebbar)");
+    connect(mh, &QToolButton::toggled, this, [](bool on) { MirrorSettings::instance().setHorizontal(on); });
+    connect(mv, &QToolButton::toggled, this, [](bool on) { MirrorSettings::instance().setVertical(on); });
 
     // Zoom-Änderungen (Mausrad, Fit) anzeigen.
     connect(m_canvas, &CanvasWidget::zoomChanged, this, [this](float z) {

@@ -1,6 +1,7 @@
 #include "canvaswidget.h"
 #include "document.h"
 #include "tools.h"
+#include "mirror.h"
 
 #include <QOpenGLShaderProgram>
 #include <QOpenGLTexture>
@@ -58,6 +59,10 @@ CanvasWidget::CanvasWidget(Document* doc, ToolManager* tools, QWidget* parent)
         }
     });
     m_marchTimer->start();
+
+    // Spiegelachsen: bei jeder Änderung (Ein/Aus, Verschieben) neu zeichnen.
+    connect(&MirrorSettings::instance(), &MirrorSettings::changed,
+            this, [this]() { update(); });
 }
 
 // Multi-Document: Leinwand auf ein anderes Document umschwenken.
@@ -129,7 +134,14 @@ void CanvasWidget::initializeGL() {
         "uniform vec2 u_checkerCount;\n"
         "uniform vec2 u_texSize;\n"
         "uniform float u_zoom;\n"
+        "uniform vec2 u_origin;\n"
+        "uniform float u_scale;\n"
         "void main(){\n"
+        // Dokumentkoordinate exakt aus der Fragmentposition berechnen
+        // (statt interpolierter UVs, die beim Verschieben um Bruchteile
+        // schwanken und Pixel springen lassen).
+        "    vec2 doc = vec2(gl_FragCoord.x - u_origin.x, u_origin.y - gl_FragCoord.y) / u_scale;\n"
+        "    vec2 duv = doc / u_texSize;\n"
         // Pixel-perfektes Sampling:
         //  - Zoom >= 100%: Bildschirm-Pixelmitte -> liegt nie auf einer
         //    Dokument-Pixelgrenze (Pan ganzzahlig, Zoom ganzzahlig).
@@ -140,11 +152,11 @@ void CanvasWidget::initializeGL() {
         // Position (kein optisches Verschieben/Flackern) und behalten ihre
         // Originalfarbe (Nearest, kein Verwischen).
         "    float z = max(u_zoom, 0.0001);\n"
-        "    vec2 pix = floor(v_uv * u_texSize - max(0.0, 0.5 / z - 0.5));\n"
+        "    vec2 pix = floor(doc - max(0.0, 0.5 / z - 0.5));\n"
         "    pix = clamp(pix, vec2(0.0), u_texSize - 1.0);\n"
         "    vec2 uv = (pix + 0.5) / u_texSize;\n"
         "    vec4 tex = texture(u_tex, uv);\n"
-        "    vec2 ch = floor(v_uv * u_checkerCount);\n"
+        "    vec2 ch = floor(duv * u_checkerCount);\n"
         "    float c = mod(ch.x + ch.y, 2.0);\n"
         "    vec3 c1 = vec3(60.0/255.0);\n"
         "    vec3 c2 = vec3(90.0/255.0);\n"
@@ -215,6 +227,13 @@ void CanvasWidget::paintGL() {
     m_prog->setUniformValue("u_texSize",
         QVector2D(float(m_doc->width()), float(m_doc->height())));
     m_prog->setUniformValue("u_zoom", m_zoom);
+    {
+        const qreal dpr = devicePixelRatioF();
+        m_prog->setUniformValue("u_origin",
+            QVector2D(float(std::round(m_pan.x() * dpr)),
+                      float(std::round(height() * dpr) - std::round(m_pan.y() * dpr))));
+        m_prog->setUniformValue("u_scale", float(m_zoom * dpr));
+    }
     m_vao.bind();
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     m_vao.release();
@@ -319,9 +338,111 @@ void CanvasWidget::paintGL() {
         const int bh = int(std::round(docH * m_zoom));
         gp.drawRect(QRect(bx, by, bw, bh));
     }
+
+    paintMirrorAxes();
+}
+
+// ---------------------------------------------------------------------------
+// Spiegelachsen
+// ---------------------------------------------------------------------------
+namespace { constexpr qreal kHandleGap = 16.0; constexpr qreal kHandleSize = 14.0; }
+
+// Griff einer Achse: sitzt knapp AUSSERHALB der Leinwand (oben bzw. links).
+// Nur an diesem Griff lässt sich die Achse verschieben.
+QRectF CanvasWidget::axisHandleRect(AxisHandle which) const {
+    auto& m = MirrorSettings::instance();
+    if (which == AxisHandle::Vertical && m.horizontal()) {
+        const qreal sx = m_pan.x() + m.axisX(m_doc->width()) * m_zoom;
+        const qreal sy = qMax(kHandleSize / 2 + 1, m_pan.y() - kHandleGap);
+        return QRectF(sx - kHandleSize / 2, sy - kHandleSize / 2, kHandleSize, kHandleSize);
+    }
+    if (which == AxisHandle::Horizontal && m.vertical()) {
+        const qreal sy = m_pan.y() + m.axisY(m_doc->height()) * m_zoom;
+        const qreal sx = qMax(kHandleSize / 2 + 1, m_pan.x() - kHandleGap);
+        return QRectF(sx - kHandleSize / 2, sy - kHandleSize / 2, kHandleSize, kHandleSize);
+    }
+    return QRectF();
+}
+
+CanvasWidget::AxisHandle CanvasWidget::axisHandleAt(const QPointF& p) const {
+    const QRectF v = axisHandleRect(AxisHandle::Vertical).adjusted(-4, -4, 4, 4);
+    const QRectF h = axisHandleRect(AxisHandle::Horizontal).adjusted(-4, -4, 4, 4);
+    if (!v.isNull() && v.contains(p)) return AxisHandle::Vertical;
+    if (!h.isNull() && h.contains(p)) return AxisHandle::Horizontal;
+    return AxisHandle::None;
+}
+
+void CanvasWidget::paintMirrorAxes() {
+    auto& m = MirrorSettings::instance();
+    if (!m.any()) return;
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing, false);
+
+    const qreal left = m_pan.x(), top = m_pan.y();
+    const qreal right = left + m_doc->width() * m_zoom;
+    const qreal bottom = top + m_doc->height() * m_zoom;
+
+    auto dashed = [](const QColor& c, qreal offset) {
+        QPen pen(c, 1);
+        pen.setDashPattern(QVector<qreal>{5, 5});
+        pen.setDashOffset(offset);
+        pen.setCosmetic(true);
+        return pen;
+    };
+    const QColor accent(255, 90, 160);
+
+    auto drawHandle = [&](const QRectF& r, bool vertical) {
+        p.setRenderHint(QPainter::Antialiasing, true);
+        p.setPen(QPen(QColor(255, 255, 255), 1.5));
+        p.setBrush(accent);
+        p.drawRoundedRect(r, 3, 3);
+        // Doppelpfeil als Hinweis auf die Verschiebe-Richtung.
+        p.setPen(QPen(Qt::white, 1.5));
+        const QPointF c = r.center();
+        if (vertical) { p.drawLine(c + QPointF(-4, 0), c + QPointF(4, 0));
+                        p.drawLine(c + QPointF(-4, 0), c + QPointF(-2, -2));
+                        p.drawLine(c + QPointF(-4, 0), c + QPointF(-2, 2));
+                        p.drawLine(c + QPointF(4, 0),  c + QPointF(2, -2));
+                        p.drawLine(c + QPointF(4, 0),  c + QPointF(2, 2)); }
+        else          { p.drawLine(c + QPointF(0, -4), c + QPointF(0, 4));
+                        p.drawLine(c + QPointF(0, -4), c + QPointF(-2, -2));
+                        p.drawLine(c + QPointF(0, -4), c + QPointF(2, -2));
+                        p.drawLine(c + QPointF(0, 4),  c + QPointF(-2, 2));
+                        p.drawLine(c + QPointF(0, 4),  c + QPointF(2, 2)); }
+        p.setRenderHint(QPainter::Antialiasing, false);
+    };
+
+    if (m.horizontal()) {   // senkrechte Achse (links <-> rechts gespiegelt)
+        const qreal sx = std::floor(m_pan.x() + m.axisX(m_doc->width()) * m_zoom) + 0.5;
+        const QRectF hr = axisHandleRect(AxisHandle::Vertical);
+        const qreal y0 = qMin(top, hr.center().y());
+        p.setPen(dashed(QColor(255, 255, 255, 235), 0));
+        p.drawLine(QPointF(sx, y0), QPointF(sx, bottom));
+        p.setPen(dashed(QColor(20, 20, 20, 235), 5));
+        p.drawLine(QPointF(sx, y0), QPointF(sx, bottom));
+        drawHandle(QRectF(sx - kHandleSize / 2, hr.top(), kHandleSize, kHandleSize), true);
+    }
+    if (m.vertical()) {     // waagerechte Achse (oben <-> unten gespiegelt)
+        const qreal sy = std::floor(m_pan.y() + m.axisY(m_doc->height()) * m_zoom) + 0.5;
+        const QRectF hr = axisHandleRect(AxisHandle::Horizontal);
+        const qreal x0 = qMin(left, hr.center().x());
+        p.setPen(dashed(QColor(255, 255, 255, 235), 0));
+        p.drawLine(QPointF(x0, sy), QPointF(right, sy));
+        p.setPen(dashed(QColor(20, 20, 20, 235), 5));
+        p.drawLine(QPointF(x0, sy), QPointF(right, sy));
+        drawHandle(QRectF(hr.left(), sy - kHandleSize / 2, kHandleSize, kHandleSize), false);
+    }
 }
 
 void CanvasWidget::mousePressEvent(QMouseEvent* e) {
+    // Spiegelachse am Griff außerhalb der Leinwand anfassen.
+    if (e->button() == Qt::LeftButton) {
+        const AxisHandle h = axisHandleAt(e->position());
+        if (h != AxisHandle::None) {
+            m_axisDrag = h;
+            return;
+        }
+    }
     if (e->button() == Qt::MiddleButton) {
         m_panning = true; m_lastPos = e->pos();
         setCursor(Qt::ClosedHandCursor);
@@ -335,6 +456,22 @@ void CanvasWidget::mousePressEvent(QMouseEvent* e) {
 }
 
 void CanvasWidget::mouseMoveEvent(QMouseEvent* e) {
+    if (m_axisDrag != AxisHandle::None) {
+        const QPointF d = screenToDoc(e->position());
+        auto& m = MirrorSettings::instance();
+        if (m_axisDrag == AxisHandle::Vertical)
+            m.setAxisX(qBound(0.0, d.x(), double(m_doc->width())));
+        else
+            m.setAxisY(qBound(0.0, d.y(), double(m_doc->height())));
+        return;
+    }
+    if (!m_panning) {
+        const AxisHandle h = axisHandleAt(e->position());
+        if (h != AxisHandle::None) {
+            setCursor(h == AxisHandle::Vertical ? Qt::SizeHorCursor : Qt::SizeVerCursor);
+            return;
+        }
+    }
     if (m_panning) {
         // delta ist bereits ganzzahlig (Mauskoordinaten sind es). Wenn
         // m_pan vor dem Drag ganzzahlig war, bleibt er es auch hier.
@@ -355,6 +492,11 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent* e) {
 }
 
 void CanvasWidget::mouseReleaseEvent(QMouseEvent* e) {
+    if (m_axisDrag != AxisHandle::None && e->button() == Qt::LeftButton) {
+        m_axisDrag = AxisHandle::None;
+        updateCursor();
+        return;
+    }
     if (e->button() == Qt::MiddleButton) {
         m_panning = false;
         setCursor(Qt::ArrowCursor);

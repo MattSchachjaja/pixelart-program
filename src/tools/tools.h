@@ -38,8 +38,10 @@ public:
     void setPixelPerfect(bool p) { m_pixelPerfect = p; }
     bool pixelPerfect() const { return m_pixelPerfect; }
 private:
-    void plot(int x, int y);          // einzelnen Pixel setzen (mit Auswahl- & Besuchs-Test)
-    void restore(int x, int y);       // Pixel aus Vor-Zustand zurückholen (Ecke entfernen)
+    void plot(int x, int y);          // Pixel setzen (inkl. gespiegelter Kopien)
+    void plotOne(int x, int y);       // einzelnen Pixel setzen (mit Auswahl- & Besuchs-Test)
+    void restore(int x, int y);       // Pixel aus Vor-Zustand zurückholen (inkl. Spiegelung)
+    void restoreOne(int x, int y);
     void line(int x0, int y0, int x1, int y1);  // Bresenham
     void growDirty(const QRect& r);
 
@@ -83,7 +85,8 @@ public:
 
 private:
     void paintDot(const QPointF& p, bool erase);
-    void stampDab(const QPointF& p, bool erase);       // Max-Maske (nie stapelnd)
+    void stampDab(const QPointF& p, bool erase);       // inkl. gespiegelter Stempel
+    void stampDabOne(const QPointF& p, bool erase);    // Max-Maske (nie stapelnd)
     void paintLine(const QPointF& a, const QPointF& b, bool erase);
     void growDirty(const QRect& r);
 
@@ -261,6 +264,9 @@ private:
     ShapeMode   m_mode = Rectangle;
     bool        m_filled = true;
     int         m_strokeWidth = 2;
+
+    void drawShape(QPainter& painter, const QRectF& rect) const;
+    void drawShapeMirrored(QPainter& painter, const QRectF& rect) const;
 };
 
 // ---------- Füllen ----------

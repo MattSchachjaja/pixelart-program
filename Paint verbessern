@@ -1,0 +1,19 @@
+
+-Das Auswahlwerkzeug markiert nicht präziese genug. Wenn ich eine Auswahl treffe mit der linken Maustaste, dann soll die Auswahl genau von dort wo ich mit der Maus angeklickt habe bis dahin wohin ich mit der Maus die Auswahl gezogen habe auf den Pixel genau die Auswahl treffen.
+-Wenn ich auf eine EBene vom Ebenenfenster doppelklick mache, soll ich sofort Tippen können und damit die Ebene sofort umbenennen können.
+-Oben bei der Leiste wenn man "Bild" anklickt soll es die Option geben vertikal oder horizontal die Leinwand mit allen Pixel zu spiegeln.
+-Wenn ich zurückzoome, sollen die Pixel immer original aussehen und sich nicht optisch verschieben.
+-Wenn ich eine Auswahl treffe, diese kopiere und eine neue Datei erstellen möchte, dann soll die Leinwandgröße vor so eingestellt werden, wie die größe der kopierten Auswahl ist.
+-Wenn ich das Programm schließen, sollen sich die SHortcuts speichern und beim erneuten öffnen sofort so eingestellt sein wie man es vorher gemacht hat.
+-Wenn ich auf einer Ebene mit dem Auswahlwerkzeug eine auswahl treffe un dann mit dem Verschieben Werkzeug die Pixel der Auswahl verschiebe, dann solen sich nur die Pixel dieser Ebene verschieben.
+-die Werkzeugfenster sollen nicht oben vertikal scaliert werden sondern nur von unten.
+-Wenn ich eine neue Ebene erstelle, dann soll sie direkt über der aktuellen Ebene eingefügt werden.
+-Wenn ich eine Auswahl mit dem Auswahlwerkzeug getroffen habe und versuche an einer Ecke zu Auswahl zu skalieren, dann stürzt das Programm ab. Das soll nicht passieren.
+-strg+s als Shortcut, um als eine Datei zu speichern, die das originale Projekt mit dem Verlauf und Ebenen usw. speichert.
+-strg+shift+s als Shortcut, um sofort als eine PNG zu speichern.
+-Ganz oben vom Programm unter "Datei" soll man einmal das Projekt speichern können und einmal als PNG speichern können.
+-Wenn bei den Farbpaletten die Transparenz eines Farbslots unter 100% ist, dann soll am Farbslot eine kleine Markierung dafür zu sehen sein.
+-Im Farbfenster soll man auch Helligkeit einer Farbe einstellen können durch einen Regler.
+-wenn ich Farbslots einstelle und dann im Verlauf rückgängig mache, dann werden die nicht rückgängig gemacht und reihen sich neu ein. Mache, dass die Veränderung nur rückgängig gemacht wird.
+-Wenn ich mit dem Füllwerkzeug rechtsklick auf eine Farbe klicke, sollen die Pixel gelöscht werden.
+-Wenn ich eine Ebene umbennene und der Name länger ist, dann habe ich 2 Zeilen, aber die Buchstaben sind abgeschnitte. Du sollst die Buchstaben lesbar darstellen.

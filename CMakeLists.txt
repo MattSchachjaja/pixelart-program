@@ -22,6 +22,7 @@ add_executable(minipaint
     src/core/config.h
     src/core/colorutils.h
     src/core/layer.h
+    src/core/mirror.h
     src/core/document.cpp
     src/core/document.h
     src/core/colorstate.cpp

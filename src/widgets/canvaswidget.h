@@ -70,6 +70,13 @@ private:
     void recreateTexture();      // Textur sauber neu erzeugen (verhindert Qt6 Storage-Fehler)
     void rebuildVBO();
     void updateCursor();  // Hilfsfunktion zum Setzen des Cursors
+
+    // --- Spiegelachsen (Live-Spiegelung) ---
+    enum class AxisHandle { None, Vertical, Horizontal };
+    QRectF    axisHandleRect(AxisHandle which) const;   // Griff außerhalb der Leinwand
+    AxisHandle axisHandleAt(const QPointF& screenPos) const;
+    void      paintMirrorAxes();
+    AxisHandle m_axisDrag = AxisHandle::None;
     void rebuildSelectionOverlay();  // blaue Auswahl-Einfärbung + Kanten cachen
     bool isSelectionToolActive() const;  // true bei Auswahl-/Verschiebe-Werkzeugen
 
