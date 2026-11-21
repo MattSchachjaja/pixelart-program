@@ -49,6 +49,7 @@
 #include <QSettings>
 #include <QCloseEvent>
 #include <cmath>
+#include <algorithm>
 
 
 // ===================================================================
@@ -598,7 +599,7 @@ void MainWindow::constrainDock(QDockWidget* dock) {
 
 // Version der gespeicherten Fenster-Anordnung. Wird sie erhöht, wird eine
 // ältere gespeicherte Anordnung einmalig verworfen (-> Standard-Anordnung).
-static constexpr int kDockLayoutVersion = 2;
+static constexpr int kDockLayoutVersion = 4;
 
 QList<QPair<QString, QDockWidget*>> MainWindow::namedDocks() const {
     return {
@@ -610,56 +611,69 @@ QList<QPair<QString, QDockWidget*>> MainWindow::namedDocks() const {
     };
 }
 
-// Standard-Anordnung beim ersten Start (nach Vorlage des Nutzers):
-//  links:  Farben oben (unter der Dateivorschau), Palette darunter bis unten
-//  rechts: Ebenen oben (ca. 70 % der Höhe), Verlauf darunter bis unten,
-//          Werkzeuge links neben dem Verlauf, unten bündig.
+// Standard-Anordnung beim Start – nach der Vorlage des Nutzers.
+// Die Maße wurden auf einem 1920x1080-Bildschirm mit 120 % Skalierung in
+// BILDSCHIRM-Pixeln gemessen. Qt arbeitet mit logischen Pixeln, daher
+// wird jedes Maß durch den Skalierungsfaktor geteilt (px()).
+// Linke Fenster hängen am linken Rand unter der Dateivorschau, rechte
+// Fenster am rechten Rand; Ebenen bzw. Palette füllen die restliche Höhe.
+//  links:  Farben (300 x 453), Palette darunter bis über die Statusleiste
+//  rechts: Ebenen oben, Verlauf unten (je 238 breit, Verlauf 303 hoch),
+//          Werkzeuge (163 x 196) links neben dem Verlauf, unten bündig.
 void MainWindow::applyDefaultDockLayout() {
     if (!m_colorDock || !m_paletteDock || !m_layerDock || !m_historyDock || !m_toolsDock)
         return;
     const QRect mg = geometry();
-    if (mg.width() < 600 || mg.height() < 400) return;
+    if (mg.width() < 400 || mg.height() < 300) return;
+
+    const qreal dpr = qMax<qreal>(1.0, devicePixelRatioF());
+    auto px = [dpr](int screenPx) { return qRound(screenPx / dpr); };
 
     m_repositioning = true;
-    const int gap = 4;
 
-    int topBars = menuBar() ? menuBar()->height() : 0;
-    if (m_toolBar)     topBars += m_toolBar->height();
-    if (m_previewHost) topBars += m_previewHost->height();
-    const int statusH = statusBar() ? statusBar()->height() : 0;
-    const int top     = mg.top() + 6;
-    const int bottom  = mg.bottom() - statusH - gap;   // letzte nutzbare Zeile
+    // Unterkante der Dateivorschau (Menü + Werkzeugleiste + Vorschau).
+    int barsH = 0;
+    if (menuBar())     barsH += menuBar()->height();
+    if (m_toolBar)     barsH += m_toolBar->height();
+    if (m_previewHost) barsH += m_previewHost->height();
+    const int previewBottom = mg.top() + barsH;
+    const int statusTop = mg.bottom() + 1 - (statusBar() ? statusBar()->height() : 0);
 
     // --- Links: Farben + Palette ------------------------------------
-    const int leftW = 252;
-    const int left  = mg.left() + 2;
-    const int colorTop = mg.top() + topBars + 8;
-    const int palMinH  = qMax(180, m_paletteDock->minimumHeight());
-    const int colorH = qBound(m_colorDock->minimumHeight(), 412,
-                              qMax(m_colorDock->minimumHeight(), bottom - colorTop - palMinH - 8));
-    m_colorDock->resize(leftW, colorH);
+    const int leftW    = px(300);
+    const int left     = mg.left() + px(2);
+    const int colorTop = previewBottom + px(4);
+    const int palBottom = statusTop - px(8);              // letzte Zeile der Palette
+    const int palMinH  = qMax(px(150), m_paletteDock->minimumHeight());
+    const int colorH = qBound(m_colorDock->minimumHeight(), px(453),
+                              qMax(m_colorDock->minimumHeight(),
+                                   palBottom - colorTop - px(5) - palMinH));
+    m_colorDock->resize(qMax(leftW, m_colorDock->minimumWidth()), colorH);
     m_colorDock->move(left, colorTop);
 
-    const int palTop = colorTop + colorH + 8;
-    m_paletteDock->resize(leftW, qMax(palMinH, bottom - palTop + 1));
+    const int palTop = colorTop + colorH + px(5);
+    m_paletteDock->resize(qMax(leftW, m_paletteDock->minimumWidth()),
+                          qMax(palMinH, palBottom - palTop + 1));
     m_paletteDock->move(left, palTop);
 
     // --- Rechts: Ebenen + Verlauf -----------------------------------
-    const int rightW = 330;
-    const int rightX = mg.right() - rightW - 1;
-    const int avail  = bottom - top + 1;
-    const int layerH = int(avail * 0.70);
-    m_layerDock->resize(rightW, layerH);
-    m_layerDock->move(rightX, top);
-
-    const int histTop = top + layerH + 6;
-    m_historyDock->resize(rightW, qMax(60, bottom - histTop + 1));
+    // Ebenen und Verlauf gleich breit (Mindestbreite der Ebenen-Knöpfe beachten).
+    const int rightW = std::max({px(238), m_layerDock->minimumSizeHint().width(),
+                             m_layerDock->minimumWidth(), m_historyDock->minimumWidth()});
+    const int rightX = mg.right() - px(3) - rightW + 1;
+    const int histBottom = mg.bottom() - px(3);
+    const int histH   = px(303);
+    const int histTop = histBottom - histH + 1;
+    const int layerTop = mg.top() + px(5);
+    m_layerDock->resize(rightW, qMax(px(150), histTop - px(8) - layerTop));
+    m_layerDock->move(rightX, layerTop);
+    m_historyDock->resize(rightW, histH);
     m_historyDock->move(rightX, histTop);
 
     // --- Werkzeuge: links neben dem Verlauf, unten bündig ------------
-    const int toolsW = 205, toolsH = 205;
+    const int toolsW = px(163), toolsH = px(196);
     m_toolsDock->resize(toolsW, toolsH);
-    m_toolsDock->move(rightX - 12 - toolsW, bottom - toolsH + 1);
+    m_toolsDock->move(rightX - px(12) - toolsW, mg.bottom() - px(9) - toolsH + 1);
 
     m_repositioning = false;
     for (auto it = m_grips.constBegin(); it != m_grips.constEnd(); ++it)
@@ -862,11 +876,6 @@ void MainWindow::resizeEvent(QResizeEvent* e) {
     // Wenn das Hauptfenster vergroessert/verkleinert wird,
     // Docks proportional mitbewegen (sie bleiben an ihrer relativen Stelle).
     Q_UNUSED(e);
-    // Solange der Nutzer nichts umgestellt hat, die Standard-Anordnung an
-    // die (endgültige) Fenstergröße anpassen – z.B. nach dem Maximieren.
-    if (property("dockLayoutUser").toBool()) repositionDocksRelative();
-    else                                     applyDefaultDockLayout();
-
     // Preview-Leiste (schwebendes Child-Widget) direkt unter dem ToolBar
     // positionieren. Die Breite wird an den tatsächlichen Inhalt
     // (Thumbnails) angepasst, damit der transparente Bereich keine
@@ -886,6 +895,13 @@ void MainWindow::resizeEvent(QResizeEvent* e) {
         m_previewHost->setGeometry(0, top, w, m_previewHost->height());
         m_previewHost->raise();
     }
+
+    // Erst NACH der Preview-Leiste die Fenster setzen (die Standard-
+    // Anordnung richtet das Farben-Fenster an der Leiste aus).
+    // Solange der Nutzer nichts umgestellt hat, die Standard-Anordnung an
+    // die (endgültige) Fenstergröße anpassen – z.B. nach dem Maximieren.
+    if (property("dockLayoutUser").toBool()) repositionDocksRelative();
+    else                                     applyDefaultDockLayout();
 
     QMainWindow::resizeEvent(e);
 }
@@ -1417,7 +1433,7 @@ void MainWindow::buildToolBar() {
 }
 
 // ===================================================================
-// Statusleiste (unterer Rand): Zoom, Mauskoordinaten, Reset-Button
+// Statusleiste (unterer Rand): Zoom und Mauskoordinaten
 // ===================================================================
 
 void MainWindow::buildStatusBar() {
@@ -1426,11 +1442,7 @@ void MainWindow::buildStatusBar() {
     sb->setStyleSheet(
         "QStatusBar{ background:#2b2b2b; color:#ccc; }"
         "QStatusBar::item{ border:none; }"
-        "QLabel{ color:#ccc; padding:0 8px; }"
-        "QPushButton{ background:#3a3a3a; color:#ddd; border:1px solid #555;"
-        "  border-radius:3px; padding:2px 12px; }"
-        "QPushButton:hover{ background:#4a4a4a; }"
-        "QPushButton:pressed{ background:#2f2f2f; }");
+        "QLabel{ color:#ccc; padding:0 8px; }");
 
     // Zoom-Anzeige (z. B. "100%").
     m_statusZoom = new QLabel("100%", this);
@@ -1445,12 +1457,7 @@ void MainWindow::buildStatusBar() {
     m_statusPos->setToolTip("Mausposition auf der Leinwand");
     sb->addWidget(m_statusPos);
 
-    // Reset-Button ganz rechts: setzt die Ansicht auf 100% und zentriert.
-    m_statusReset = new QPushButton("Ansicht zurücksetzen", this);
-    m_statusReset->setToolTip("Zoom auf 100% setzen und die Leinwand zentrieren");
-    sb->addPermanentWidget(m_statusReset);
-
-    // Zoom-Änderungen (Mausrad, Reset, Fit) anzeigen.
+    // Zoom-Änderungen (Mausrad, Fit) anzeigen.
     connect(m_canvas, &CanvasWidget::zoomChanged, this, [this](float z) {
         const int pct = qRound(z * 100.0f);
         if (qAbs(z * 100.0f - pct) < 0.01f)
@@ -1464,11 +1471,6 @@ void MainWindow::buildStatusBar() {
         m_statusPos->setText(QString("X: %1  Y: %2")
             .arg(int(std::floor(p.x())))
             .arg(int(std::floor(p.y()))));
-    });
-
-    // Button setzt die Ansicht zurück (zentriert + 100%).
-    connect(m_statusReset, &QPushButton::clicked, this, [this]() {
-        m_canvas->resetView();
     });
 }
 

@@ -162,11 +162,9 @@ private:
     QHBoxLayout*  m_toolOptionsLayout = nullptr;
 
     // --- Statusleiste (unterer Rand) ---
-    // Zeigt den aktuellen Zoom, die Mauskoordinaten in Dokument-Pixeln
-    // und einen Button, der die Ansicht zurücksetzt (100% + zentriert).
+    // Zeigt den aktuellen Zoom und die Mauskoordinaten in Dokument-Pixeln.
     QLabel*       m_statusZoom = nullptr;
     QLabel*       m_statusPos  = nullptr;
-    QPushButton*  m_statusReset = nullptr;
 
     // --- Multi-Document (Preview-Leiste) ---
     // Die Leiste sitzt direkt unter der Werkzeug-Einstellleiste und enthält
